@@ -1,0 +1,26 @@
+# Immutable byte baseline of the installed extension 2.11.6.
+# Captured from the operator workstation; the browser runs these exact bytes.
+# The four files the implementation map anchors — manifest.json, background.js,
+# content.js, chat-bridge.js — match the 830ab8c6 basis hash for hash, so the
+# slice 2 rows describe this tree and not an approximation of it.
+# sha256  path, sorted by path.
+202a35be491d0f2c684e863c5c9f91c375533e3704ab74bac3a2b0915a10006a  CHAT_ADAPTER_ARCHITECTURE.md
+25c474149d16574850491cccee021f6190c507698e396ad611ed652e2f1adfe1  README.md
+30830c99ec58a33b1ee7ba7fa190b374cecfc6c266a82cb1a11444d900eb87e7  background.js
+71272004262ef21e19cc75d0c2ce19fb242bf5d04afde1c1213f9d4b43a2c7e4  chat-bridge.js
+b85583e200ab88b6fadeadd99c053f4104020ecc9c14a952b41d12f3cf6335b1  content.js
+741453d48162ed8df785c09b6058146bf9513a4d19e6538397ac4b56a8d2278e  manifest.json
+a1682dbe9173bab4f10cd0490464539667e645ef47cc53e353e9037f63d9282b  modules/chat/adapter-core.js
+f9f2426e83aa26110afbec0680515bc4220d9ace131ae1d08c4e6afafc72d67f  modules/chat/runtime-guard.js
+8de1c575a5796cdf1ac724f4f3a687fbb4f55fa275f91a37576372aaec9821fd  modules/chat/sites.js
+d9f3d6e0b5a26fcb525ecd9ace72d05c8d6209a59b766b7e4f279f6cf44c72fd  modules/chat/turn-watcher.js
+0b26458fa3e220572580fca374067ca85edd3abb8b88e9085a05cd7c6e043075  modules/chatgpt/adapter.js
+01b519111989495715a0324428aac304a9e9088694c8f06c78f3b7dfe1855e05  modules/claude/adapter.js
+5c512434a46baa187d7fc781f8ca2a3c242c469304a18cc83eba603baff51835  modules/claude/attachment-signals.js
+27fcf59bfcdc94f611ff754437b0174053125299305cb4feff4c977d9d9bcbc8  modules/claude/dom-signals.js
+1aa0c265d7fbef768a0473efff45ba571aa0cb4d0101494132020a560ac9629c  modules/claude/last-response-recovery.js
+ac3783b7739ffba3b9f570083e040d2199fbb1609d3cca39d54a64167af1eed4  modules/claude/turn-watcher.js
+d3f69780fde30fb2c1a065f67ad1db808a15dee768e5bd1293c36cd82e6ca83e  page-hook.js
+ec86fc1731cf924f2c1004fcf8a6794522e89c0211590b8ec76b9b70c6e53055  popup.css
+f22f2b9ee16d1de79c595b666ce4c7b2ea61a00edc3bb22367db1137e5a2ad64  popup.html
+db993b6f0ffb8a1746fa349361f771d4b4031b129062cb1e045d08fddc4eae7d  popup.js

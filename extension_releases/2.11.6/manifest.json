@@ -1,0 +1,88 @@
+{
+  "manifest_version": 3,
+  "name": "Prompt Automation Pro 2",
+  "version": "2.11.6",
+  "description": "Prompt Automation Pro 2 with resilient ChatGPT preview/download capture and unknown-length file transfer.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs",
+    "scripting",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://claude.ai/*",
+    "https://*.claude.ai/*",
+    "https://chatgpt.com/*",
+    "https://*.chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://claude.ai/*",
+        "https://*.claude.ai/*"
+      ],
+      "js": [
+        "modules/chat/sites.js",
+        "modules/chat/adapter-core.js",
+        "modules/chat/runtime-guard.js",
+        "modules/claude/dom-signals.js",
+        "modules/claude/attachment-signals.js",
+        "modules/claude/adapter.js",
+        "content.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://claude.ai/*",
+        "https://*.claude.ai/*"
+      ],
+      "js": [
+        "modules/chat/runtime-guard.js",
+        "modules/chat/turn-watcher.js",
+        "modules/claude/last-response-recovery.js",
+        "chat-bridge.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://*.chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "modules/chat/sites.js",
+        "modules/chat/adapter-core.js",
+        "modules/chat/runtime-guard.js",
+        "modules/chatgpt/adapter.js",
+        "content.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://*.chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "modules/chat/runtime-guard.js",
+        "modules/chat/turn-watcher.js",
+        "chat-bridge.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Prompt Automation Pro 2",
+    "default_popup": "popup.html"
+  }
+}
