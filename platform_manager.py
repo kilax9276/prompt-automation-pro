@@ -32,6 +32,28 @@ def stop_child(name: str, proc: subprocess.Popen | None, timeout: float = 10.0) 
     raise RuntimeError(f'{name} pid={proc.pid} did not stop after SIGTERM')
 
 
+def load_receiver_release(root: Path) -> tuple[str, Path]:
+    """Resolve the active receiver the same way the console is resolved.
+
+    Until a marker exists the legacy layout applies and root/server.py is the
+    receiver; that is the pre-migration state, not an error. A marker that is
+    present but malformed, or points at a missing file, is an error and must
+    not silently fall back — a half-applied activation is exactly the case
+    where guessing is worst.
+    """
+    marker = root / 'runtime' / 'receiver-current.json'
+    if not marker.is_file():
+        return 'legacy', (root / 'server.py').resolve()
+    body = json.loads(marker.read_text('utf-8'))
+    version = str(body['version'])
+    target = (root / str(body['path'])).resolve()
+    if root.resolve() not in target.parents:
+        raise RuntimeError('receiver release path escapes root')
+    if not target.is_file():
+        raise RuntimeError(f'receiver server.py missing at {target}')
+    return version, target
+
+
 def load_console_release(root: Path) -> tuple[str, Path]:
     marker = root / 'runtime' / 'console-current.json'
     body = json.loads(marker.read_text('utf-8'))
@@ -62,6 +84,7 @@ def main() -> None:
     receiver: subprocess.Popen | None = None
     console: subprocess.Popen | None = None
     console_key: tuple[str, str] | None = None
+    receiver_current: tuple[str, str] | None = None
 
     def shutdown(signum, frame):
         print(f'[{now()}] platform manager received signal={signum}', flush=True)
@@ -87,13 +110,20 @@ def main() -> None:
             if not token:
                 raise RuntimeError('runtime/token.txt is empty')
 
-            if receiver is None or receiver.poll() is not None:
+            receiver_version, receiver_path = load_receiver_release(root)
+            receiver_key = (receiver_version, str(receiver_path))
+            # Restart on marker change as well as on death, so activating a
+            # receiver release behaves exactly like activating a console one.
+            if receiver is None or receiver.poll() is not None or receiver_key != receiver_current:
+                if receiver is not None and receiver.poll() is None:
+                    stop_child('receiver', receiver)
                 env = os.environ.copy()
                 env['CLAUDE_RECEIVER_TOKEN'] = token
-                cmd = [sys.executable, str(root / 'server.py'), '--host', args.receiver_host, '--port', str(args.receiver_port), '--data-dir', str(root / 'data')]
-                print(f'[{now()}] starting receiver: {" ".join(cmd)}', flush=True)
+                cmd = [sys.executable, str(receiver_path), '--host', args.receiver_host, '--port', str(args.receiver_port), '--data-dir', str(root / 'data')]
+                print(f'[{now()}] starting receiver version={receiver_version}: {" ".join(cmd)}', flush=True)
                 receiver = subprocess.Popen(cmd, env=env, stdout=receiver_log, stderr=subprocess.STDOUT)
                 (runtime / 'receiver.pid').write_text(str(receiver.pid)+'\n', encoding='utf-8')
+                receiver_current = receiver_key
 
             version, release = load_console_release(root)
             key=(version, str(release))

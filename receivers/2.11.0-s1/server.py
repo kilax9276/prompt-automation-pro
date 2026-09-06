@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "2.10.0"
+VERSION = "2.11.0-s1"
 # Keep the historical service id for extension compatibility. Chat-specific
 # behavior is now described by chatType/chatLabel metadata instead.
 SERVICE = "prompt-automation-pro2-receiver"

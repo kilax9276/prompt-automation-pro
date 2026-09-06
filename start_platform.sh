@@ -22,6 +22,11 @@ if not marker.is_file():
     marker.write_text(json.dumps({'version':prepared_version,'path':f'console_releases/{prepared_version}'},indent=2)+'\n',encoding='utf-8')
 active=json.loads(marker.read_text('utf-8'))
 active_version=str(active.get('version') or '')
+rmarker=runtime/'receiver-current.json'
+if rmarker.is_file():
+    active_receiver=str(json.loads(rmarker.read_text('utf-8')).get('version') or '')
+else:
+    active_receiver='2.10.0'
 pidfile=runtime/'platform-manager.pid'
 alive=False
 try:
@@ -38,12 +43,13 @@ for _ in range(120):
     try:
         with urllib.request.urlopen('http://127.0.0.1:8867/health',timeout=1) as rr: r=json.loads(rr.read().decode())
         with urllib.request.urlopen('http://127.0.0.1:8871/health',timeout=1) as cr: c=json.loads(cr.read().decode())
-        if r.get('version')=='2.10.0' and c.get('version')==active_version:
+        if r.get('version')==active_receiver and c.get('version')==active_version:
             host=os.environ.get('PAP_PUBLIC_HOST','192.168.10.78')
             print('RET_VALUE::PLATFORM2_READY=1')
             print(f'RET_VALUE::RECEIVER2_URL=http://{host}:8867')
             print(f'RET_VALUE::CONSOLE2_URL=http://{host}:8871')
             print('RET_VALUE::CONSOLE2_VERSION='+active_version)
+            print('RET_VALUE::RECEIVER2_VERSION='+active_receiver)
             print('RET_VALUE::PREPARED_CONSOLE2_VERSION='+prepared_version)
             _t=token_file.read_text('utf-8').strip(); print('RET_VALUE::TOKEN2_LEN='+str(len(_t))); print('RET_VALUE::TOKEN2_FP='+__import__('hashlib').sha256(_t.encode('utf-8')).hexdigest()[:12])
             break

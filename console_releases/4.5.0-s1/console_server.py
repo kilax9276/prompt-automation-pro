@@ -27,7 +27,7 @@ from chat_bindings import ChatBindingError, ChatBindingsStore
 from endpoint_registry import EndpointError, EndpointRegistry
 from run_profile_context import ProfileAuthorizationError, RunProfileContext
 
-VERSION = "4.4.0"
+VERSION = "4.5.0-s1"
 CONSOLE_SERVER_KEY = web.AppKey("console_server", object)
 
 
