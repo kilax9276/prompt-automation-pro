@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Prompt Automation Pro 2 — Step Console</title>
+  <link rel="stylesheet" href="/static/style.css?v=4.4.0">
+</head>
+<body>
+  <div id="login" class="login-overlay">
+    <div class="login-card">
+      <h1>Prompt Automation Pro 2</h1>
+      <p>Step Console</p>
+      <label>Оператор
+        <input id="operatorInput" type="text" autocomplete="off" placeholder="например kilax">
+      </label>
+      <label>Bearer token
+        <input id="tokenInput" type="password" autocomplete="off" placeholder="token из runtime/token.txt">
+      </label>
+      <button id="loginBtn" class="primary">Подключиться</button>
+      <div id="loginError" class="error-text"></div>
+    </div>
+  </div>
+
+  <header class="topbar">
+    <div>
+      <div class="brand-row">
+        <div class="brand">Prompt Automation Pro 2</div>
+        <span class="badge console-version-badge">Web Console v4.4.0</span>
+      </div>
+      <div class="subtitle">Пошаговый протокол / server executor</div>
+    </div>
+    <div class="top-actions">
+      <span id="operatorBadge" class="badge">Оператор: -</span>
+      <span id="wsBadge" class="badge offline">WebSocket: offline</span>
+      <button id="copyFullRunLogBtn" disabled>Копировать терминальный лог</button>
+      <button id="downloadFullRunLogBtn" disabled>Скачать терминальный лог</button>
+      <button id="forgetTokenBtn">Сбросить token</button>
+    </div>
+  </header>
+
+  <nav class="section-nav">
+    <button class="nav-btn active" data-view="runs">Runs</button>
+    <button class="nav-btn" data-view="profiles">Профили</button>
+    <button class="nav-btn" data-view="chats">Чаты</button>
+    <button class="nav-btn" data-view="history">Журнал</button>
+  </nav>
+
+  <div id="viewRuns" class="app-view">
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="side-head">
+        <strong>Runs</strong>
+        <button id="refreshRunsBtn" class="small">Обновить</button>
+      </div>
+      <div id="runs" class="run-list"></div>
+    </aside>
+
+    <main class="main">
+      <section id="emptyState" class="empty-state">
+        <h2>Выберите run</h2>
+        <p>Новый результат расширения появится здесь автоматически через WebSocket.</p>
+      </section>
+
+      <div id="runView" class="hidden">
+        <section class="card run-head">
+          <div>
+            <div class="label">Run</div>
+            <div id="runId" class="mono wrap"></div>
+          </div>
+          <div class="status-row">
+            <span id="receiverStatus" class="badge"></span>
+            <span id="workflowStatus" class="badge"></span>
+            <span id="profileResolutionBadge" class="badge"></span>
+          </div>
+          <div class="meta-grid">
+            <div><span class="label">Чат</span><div id="chatTypeValue"></div></div>
+            <div><span class="label">Page</span><div id="pageUrl" class="wrap"></div></div>
+            <div><span class="label">Conversation</span><div id="chatConversationId" class="mono wrap"></div></div>
+            <div><span class="label">Parser generated</span><div id="generatedAt"></div></div>
+            <div><span class="label">Файлы receiver</span><div id="fileCount"></div></div>
+            <div><span class="label">Порядок</span><div id="orderValue"></div></div>
+          </div>
+        </section>
+
+
+        <section class="card">
+          <div class="section-title">
+            <h2>Терминальный лог run</h2>
+            <div class="buttons">
+              <button id="loadFullRunLogBtn" class="small">Показать терминальный лог</button>
+              <button id="copyFullRunLogInlineBtn" class="small">Копировать</button>
+              <button id="downloadFullRunLogInlineBtn" class="small">Скачать .log</button>
+            </div>
+          </div>
+          <div class="hint">Только выполненные shell-команды и их сырой stdout+stderr в терминальном виде. Никаких audit, STOP/CONTINUE, event journal, PUT/GET или служебных заголовков в этом логе нет.</div>
+          <pre id="fullRunLog" class="terminal compact hidden"></pre>
+        </section>
+
+        <section class="card">
+          <div class="section-title">
+            <h2>Файлы, полученные от расширения</h2>
+          </div>
+          <div id="sourceFiles" class="file-grid"></div>
+        </section>
+
+        <section class="card">
+          <div class="section-title">
+            <h2>Пошаговый план</h2>
+            <span class="hint">Следующий operational step нельзя выполнить, пока предыдущий не завершён или явно не overridden.</span>
+          </div>
+          <div id="steps" class="steps"></div>
+        </section>
+
+
+
+        <section class="card">
+          <div class="section-title">
+            <h2>Raw parser JSON</h2>
+            <button id="copyRawBtn" class="small">Копировать JSON</button>
+          </div>
+          <pre id="rawJson" class="terminal compact"></pre>
+        </section>
+
+
+        <section class="card" id="deliveryCard">
+          <div class="section-title">
+            <h2>Сообщение и файлы в исходную вкладку чата</h2>
+            <span id="deliveryTargetBadge" class="badge">Extension: ожидание</span>
+          </div>
+          <div class="hint delivery-intro">Это поле можно заполнять вручную. После COMMAND_GET_REPORTS список отсутствующих файлов автоматически дописывается в конец текста как: «Такие файлы отсутствуют: ...». Затем расширение загрузит найденные reports и терминальный лог в ту же исходную вкладку чата.</div>
+          <div id="reportSummary" class="delivery-summary"></div>
+          <div class="delivery-form">
+            <label id="deliveryMessageLabel">Текст сообщения для чата
+              <textarea id="deliveryMessage" placeholder="Напишите сообщение, которое должно попасть в исходный чат вместе с файлами"></textarea>
+            </label>
+            <div class="delivery-options">
+              <label>Файлы
+                <select id="deliveryMode" disabled>
+                  <option value="smart_zip" selected>Авто ZIP ≤30 MiB — архивы и большие файлы отдельно</option>
+                </select>
+              </label>
+              <label>Макс. размер ZIP-части, MiB (авто-режим не превышает 30)
+                <input id="aggregateMaxMiB" type="number" min="1" step="1" value="30">
+              </label>
+              <label>Считать загрузку зависшей через, сек
+                <input id="deliveryStallSeconds" type="number" min="30" step="10" value="120">
+              </label>
+            </div>
+            <div class="delivery-actions">
+              <button id="runGetReportsBtn" class="get-reports-action">Выполнить COMMAND_GET_REPORTS</button>
+              <button id="prepareDeliveryBtn" class="primary">Вставить текст и загрузить файлы в чат</button>
+              <button id="retryDeliveryBtn" disabled>Повторить не загруженные</button>
+              <button id="sendDeliveryBtn" disabled>Отправить сообщение</button>
+            </div>
+          </div>
+          <div id="deliveryJob" class="delivery-job"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  </div>
+
+  <section id="viewProfiles" class="app-view hidden management-view">
+    <div class="management-head">
+      <div><h1>Профили</h1><div class="hint">Типы задач и их конфигурация. Изменения применяются только к новым RESOLVED Run.</div></div>
+      <button id="addProfileBtn" class="primary">+ Добавить профиль</button>
+    </div>
+    <div id="profilesList" class="management-grid"></div>
+  </section>
+
+  <section id="viewChats" class="app-view hidden management-view">
+    <div class="management-head">
+      <div><h1>Чаты</h1><div class="hint">Обнаруженные вкладки и постоянные привязки переписок к профилям/ролям.</div></div>
+      <button id="addBindingBtn" class="primary">+ Добавить привязку вручную</button>
+    </div>
+    <div id="chatsSummary" class="status-row"></div>
+    <div id="endpointsList" class="management-grid"></div>
+    <h2 class="management-subtitle">Привязки</h2>
+    <div id="bindingsList" class="management-grid"></div>
+  </section>
+
+  <section id="viewHistory" class="app-view hidden management-view">
+    <div class="management-head"><div><h1>Журнал</h1><div class="hint">Изменения профилей, привязок и секретов. Значения секретов не журналируются.</div></div><button id="refreshHistoryBtn">Обновить</button></div>
+    <div id="historyList" class="history-list"></div>
+  </section>
+
+  <div id="profileModal" class="modal hidden">
+    <div class="modal-card wide">
+      <div class="modal-head"><h2 id="profileModalTitle">Профиль</h2><button data-close-modal="profileModal">×</button></div>
+      <div class="form-grid two">
+        <label>ID<input id="profileIdInput" autocomplete="off" placeholder="pap-development"></label>
+        <label>Название<input id="profileNameInput" autocomplete="off"></label>
+        <label class="check-row"><input id="profileEnabledInput" type="checkbox" checked> Включён</label>
+        <div><span class="label">Редакция / digest</span><div id="profileRevisionInfo" class="mono wrap hint">новый</div></div>
+        <label>Work directory<input id="profileWorkDirInput" placeholder="/home/ext_disk/project"></label>
+        <label>Temp directory<input id="profileTempDirInput" placeholder="/tmp/project"></label>
+      </div>
+      <div class="editor-tabs">
+        <button class="editor-tab active" data-profile-tab="variables">Переменные</button>
+        <button class="editor-tab" data-profile-tab="roles">Роли</button>
+        <button class="editor-tab" data-profile-tab="prompts">Промпты</button>
+        <button class="editor-tab" data-profile-tab="secrets">Секреты</button>
+        <button class="editor-tab" data-profile-tab="directives">Директивы</button>
+        <button class="editor-tab" data-profile-tab="errors">Ошибки</button>
+        <button class="editor-tab" data-profile-tab="delivery">Доставка</button>
+        <button class="editor-tab" data-profile-tab="chats">Привязанные чаты</button>
+      </div>
+      <div class="profile-tab-panel" data-profile-panel="variables"><label>Variables (JSON object)<textarea id="profileVariablesInput" class="json-editor">{}</textarea></label></div>
+      <div class="profile-tab-panel hidden" data-profile-panel="roles"><div class="hint">Роль — это то, чем занят чат в этой задаче. К роли привязывается чат в разделе «Чаты», и выбрать там можно только роль, объявленную здесь.</div><div id="profileRolesList" class="roles-editor"></div><div class="buttons"><button id="profileAddRole" type="button">+ Добавить роль</button></div></div>
+      <div class="profile-tab-panel hidden" data-profile-panel="prompts">
+        <label>Base prompt<textarea id="profileBasePromptInput" class="prompt-editor"></textarea></label>
+        <div class="hint">Промпты ролей редактируются на вкладке «Роли», рядом с самой ролью.</div>
+      </div>
+      <div class="profile-tab-panel hidden" data-profile-panel="secrets">
+        <label>Secret references (JSON: name → secret-id)<textarea id="profileSecretRefsInput" class="json-editor">{}</textarea></label>
+        <div id="profileSecretsMeta" class="management-grid compact"></div>
+      </div>
+      <div class="profile-tab-panel hidden" data-profile-panel="directives"><div class="hint">4.4.0 хранит и валидирует конфигурацию, но не меняет семантику директив. Action pipeline включится в 4.5.0.</div><label>Directives (JSON object)<textarea id="profileDirectivesInput" class="json-editor tall">{}</textarea></label></div>
+      <div class="profile-tab-panel hidden" data-profile-panel="errors">
+        <label>Error detection (JSON)<textarea id="profileErrorsInput" class="json-editor">{"enabled":true,"disabledBuiltins":[],"customSignatures":[]}</textarea></label>
+        <label>Проверить кусок вывода<textarea id="errorTestInput"></textarea></label>
+        <button id="errorTestBtn">Проверить сигнатуры</button><pre id="errorTestResult" class="code"></pre>
+      </div>
+      <div class="profile-tab-panel hidden" data-profile-panel="delivery">
+        <div class="form-grid two">
+          <label>Когда вкладка офлайн<select id="offlinePolicyInput"><option value="wait">Ждать вкладку</option><option value="fail">Ошибка сразу</option></select></label>
+          <label>Таймаут ожидания endpoint, сек<input id="endpointTimeoutInput" type="number" min="15" value="3600"></label>
+        </div>
+        <div class="hint">Таймаут не может быть меньше CLAIM_LEASE_SECONDS = 15. Лиза начинается только после получения задания вкладкой.</div>
+      </div>
+      <div class="profile-tab-panel hidden" data-profile-panel="chats"><div id="profileAssignedChats"></div></div>
+      <div class="modal-actions"><button data-close-modal="profileModal">Отмена</button><button id="saveProfileBtn" class="primary">Сохранить профиль</button></div>
+    </div>
+  </div>
+
+  <div id="bindingModal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head"><h2 id="bindingModalTitle">Привязка чата</h2><button data-close-modal="bindingModal">×</button></div>
+      <div class="form-grid">
+        <label>ID<input id="bindingIdInput" placeholder="pap-dev-main"></label>
+        <label>Название<input id="bindingNameInput"></label>
+        <label>Тип чата<select id="bindingChatTypeInput"><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option></select></label>
+        <label>Conversation ID<input id="bindingConversationInput" class="mono"></label>
+        <label>Project ID (derived from URL)<input id="bindingProjectInput" class="mono" readonly></label>
+        <label>Профиль<select id="bindingProfileInput"></select></label>
+        <label>Роль<select id="bindingRoleInput"></select></label>
+        <label class="check-row"><input id="bindingEnabledInput" type="checkbox" checked> Включена</label>
+        <label>Endpoint policy<select id="bindingPolicyInput"><option value="conversation">conversation</option><option value="approved_endpoint" disabled>approved_endpoint — нужен endpointId из расширения</option></select></label>
+      </div>
+      <div class="modal-actions"><button data-close-modal="bindingModal">Отмена</button><button id="saveBindingBtn" class="primary">Сохранить привязку</button></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js?v=4.4.0"></script>
+</body>
+</html>

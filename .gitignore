@@ -1,0 +1,27 @@
+# Runtime state produced by the system, never source. Committing it would also
+# publish chat content and attachments.
+data/
+storage/
+runtime/
+logs/
+
+# Deployment configuration. config/ holds profiles and chat bindings for one
+# particular host; config/secrets/ holds secret values that must never leave it.
+# Listed as config/* rather than config/ so git still descends into the
+# directory and the negation below can re-include example files.
+config/*
+!config/*.example
+console-current.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Prompt Automation Pro 2 — Step Console</title>
+  <link rel="stylesheet" href="/static/style.css?v=4.3.5">
+</head>
+<body>
+  <div id="login" class="login-overlay">
+    <div class="login-card">
+      <h1>Prompt Automation Pro 2</h1>
+      <p>Step Console</p>
+      <label>Оператор
+        <input id="operatorInput" type="text" autocomplete="off" placeholder="например kilax">
+      </label>
+      <label>Bearer token
+        <input id="tokenInput" type="password" autocomplete="off" placeholder="token из runtime/token.txt">
+      </label>
+      <button id="loginBtn" class="primary">Подключиться</button>
+      <div id="loginError" class="error-text"></div>
+    </div>
+  </div>
+
+  <header class="topbar">
+    <div>
+      <div class="brand-row">
+        <div class="brand">Prompt Automation Pro 2</div>
+        <span class="badge console-version-badge">Web Console v4.3.5</span>
+      </div>
+      <div class="subtitle">Пошаговый протокол / server executor</div>
+    </div>
+    <div class="top-actions">
+      <span id="operatorBadge" class="badge">Оператор: -</span>
+      <span id="wsBadge" class="badge offline">WebSocket: offline</span>
+      <button id="copyFullRunLogBtn" disabled>Копировать терминальный лог</button>
+      <button id="downloadFullRunLogBtn" disabled>Скачать терминальный лог</button>
+      <button id="forgetTokenBtn">Сбросить token</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="side-head">
+        <strong>Runs</strong>
+        <button id="refreshRunsBtn" class="small">Обновить</button>
+      </div>
+      <div id="runs" class="run-list"></div>
+    </aside>
+
+    <main class="main">
+      <section id="emptyState" class="empty-state">
+        <h2>Выберите run</h2>
+        <p>Новый результат расширения появится здесь автоматически через WebSocket.</p>
+      </section>
+
+      <div id="runView" class="hidden">
+        <section class="card run-head">
+          <div>
+            <div class="label">Run</div>
+            <div id="runId" class="mono wrap"></div>
+          </div>
+          <div class="status-row">
+            <span id="receiverStatus" class="badge"></span>
+            <span id="workflowStatus" class="badge"></span>
+          </div>
+          <div class="meta-grid">
+            <div><span class="label">Чат</span><div id="chatTypeValue"></div></div>
+            <div><span class="label">Page</span><div id="pageUrl" class="wrap"></div></div>
+            <div><span class="label">Conversation</span><div id="chatConversationId" class="mono wrap"></div></div>
+            <div><span class="label">Parser generated</span><div id="generatedAt"></div></div>
+            <div><span class="label">Файлы receiver</span><div id="fileCount"></div></div>
+            <div><span class="label">Порядок</span><div id="orderValue"></div></div>
+          </div>
+        </section>
+
+
+        <section class="card">
+          <div class="section-title">
+            <h2>Терминальный лог run</h2>
+            <div class="buttons">
+              <button id="loadFullRunLogBtn" class="small">Показать терминальный лог</button>
+              <button id="copyFullRunLogInlineBtn" class="small">Копировать</button>
+              <button id="downloadFullRunLogInlineBtn" class="small">Скачать .log</button>
+            </div>
+          </div>
+          <div class="hint">Только выполненные shell-команды и их сырой stdout+stderr в терминальном виде. Никаких audit, STOP/CONTINUE, event journal, PUT/GET или служебных заголовков в этом логе нет.</div>
+          <pre id="fullRunLog" class="terminal compact hidden"></pre>
+        </section>
+
+        <section class="card">
+          <div class="section-title">
+            <h2>Файлы, полученные от расширения</h2>
+          </div>
+          <div id="sourceFiles" class="file-grid"></div>
+        </section>
+
+        <section class="card">
+          <div class="section-title">
+            <h2>Пошаговый план</h2>
+            <span class="hint">Следующий operational step нельзя выполнить, пока предыдущий не завершён или явно не overridden.</span>
+          </div>
+          <div id="steps" class="steps"></div>
+        </section>
+
+
+
+        <section class="card">
+          <div class="section-title">
+            <h2>Raw parser JSON</h2>
+            <button id="copyRawBtn" class="small">Копировать JSON</button>
+          </div>
+          <pre id="rawJson" class="terminal compact"></pre>
+        </section>
+
+
+        <section class="card" id="deliveryCard">
+          <div class="section-title">
+            <h2>Сообщение и файлы в исходную вкладку чата</h2>
+            <span id="deliveryTargetBadge" class="badge">Extension: ожидание</span>
+          </div>
+          <div class="hint delivery-intro">Это поле можно заполнять вручную. После COMMAND_GET_REPORTS список отсутствующих файлов автоматически дописывается в конец текста как: «Такие файлы отсутствуют: ...». Затем расширение загрузит найденные reports и терминальный лог в ту же исходную вкладку чата.</div>
+          <div id="reportSummary" class="delivery-summary"></div>
+          <div class="delivery-form">
+            <label id="deliveryMessageLabel">Текст сообщения для чата
+              <textarea id="deliveryMessage" placeholder="Напишите сообщение, которое должно попасть в исходный чат вместе с файлами"></textarea>
+            </label>
+            <div class="delivery-options">
+              <label>Файлы
+                <select id="deliveryMode" disabled>
+                  <option value="smart_zip" selected>Авто ZIP ≤30 MiB — архивы и большие файлы отдельно</option>
+                </select>
+              </label>
+              <label>Макс. размер ZIP-части, MiB (авто-режим не превышает 30)
+                <input id="aggregateMaxMiB" type="number" min="1" step="1" value="30">
+              </label>
+              <label>Считать загрузку зависшей через, сек
+                <input id="deliveryStallSeconds" type="number" min="30" step="10" value="120">
+              </label>
+            </div>
+            <div class="delivery-actions">
+              <button id="runGetReportsBtn" class="get-reports-action">Выполнить COMMAND_GET_REPORTS</button>
+              <button id="prepareDeliveryBtn" class="primary">Вставить текст и загрузить файлы в чат</button>
+              <button id="retryDeliveryBtn" disabled>Повторить не загруженные</button>
+              <button id="sendDeliveryBtn" disabled>Отправить сообщение</button>
+            </div>
+          </div>
+          <div id="deliveryJob" class="delivery-job"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js?v=4.3.5"></script>
+</body>
+</html>
