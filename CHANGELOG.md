@@ -278,3 +278,7 @@ Now:
 - the automatic missing-files suffix is saved into the same Run-specific draft.
 
 Drafts are local to the browser profile and are not shared between browsers.
+
+---
+
+Copyright (c) 2026 Kolobov Aleksei (@kilax9276). All rights reserved. See LICENSE at the repository root.

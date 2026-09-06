@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Kolobov Aleksei (@kilax9276)
+# All rights reserved. See LICENSE at the repository root.
 from __future__ import annotations
 
 from pathlib import Path

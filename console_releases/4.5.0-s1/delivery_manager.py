@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Kolobov Aleksei (@kilax9276)
+# All rights reserved. See LICENSE at the repository root.
 from __future__ import annotations
 
 import base64

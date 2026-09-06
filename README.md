@@ -88,3 +88,7 @@ so the chain holds whether or not a repository is present.
 
 Platform 4.3.5, console 4.4.0, receiver 2.10.0, extension 2.11.6 in service.
 Release 4.5.0 is under development.
+
+---
+
+Copyright (c) 2026 Kolobov Aleksei (@kilax9276). All rights reserved. See LICENSE at the repository root.

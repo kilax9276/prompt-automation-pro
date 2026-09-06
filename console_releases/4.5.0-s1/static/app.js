@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Kolobov Aleksei (@kilax9276)
+// All rights reserved. See LICENSE at the repository root.
 (() => {
   const PAP_WEB_CONSOLE_VERSION = '4.4.0';
   console.info('[PAP Web Console] frontend loaded', {version:PAP_WEB_CONSOLE_VERSION, href:location.href});
