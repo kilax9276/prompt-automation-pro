@@ -1,0 +1,109 @@
+<!doctype html>
+<!--
+  Copyright (c) 2026 Kolobov Aleksei (@kilax9276)
+  All rights reserved. See LICENSE at the repository root.
+-->
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prompt Automation Pro 2</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <h1>Prompt Automation Pro 2</h1>
+
+    <section class="card">
+      <div class="label">Текущая вкладка</div>
+      <div id="tabUrl" class="url">—</div>
+      <div class="status-grid">
+        <span>Тип чата</span><strong id="chatType">—</strong>
+        <span>Поддерживаемая страница</span><strong id="supported">—</strong>
+        <span>Вкладка включена</span><strong id="tabEnabled">—</strong>
+        <span>Состояние</span><strong id="runState">—</strong>
+      </div>
+      <div id="runDetails" class="details"></div>
+      <div class="row buttons">
+        <button id="enableTab" class="primary">Включить на этой вкладке</button>
+        <button id="disableTab">Отключить</button>
+      </div>
+      <button id="runNow" class="wide">Запустить сейчас</button>
+    </section>
+
+    <section class="card">
+      <h2>Настройки</h2>
+
+      <label>
+        Python server base URL
+        <input id="serverBaseUrl" type="text" placeholder="http://192.168.10.78:8867">
+      </label>
+
+      <label>
+        Bearer token
+        <input id="serverToken" type="password" autocomplete="off">
+      </label>
+
+      <div class="two-col">
+        <label>
+          Задержка после загрузки, ms
+          <input id="delayMs" type="number" min="0" step="500">
+        </label>
+
+        <label>
+          Последних assistant-сообщений
+          <input id="maxAssistantMessages" type="number" min="1" step="1">
+        </label>
+      </div>
+
+      <label>
+        Какие файлы обрабатывать
+        <select id="downloadScope" disabled>
+          <option value="required">Только COMMAND_PUT_FILES из последнего ответа</option>
+        </select>
+      </label>
+
+      <div class="two-col">
+        <label>
+          Timeout старта download, ms
+          <input id="downloadStartTimeoutMs" type="number" min="1000" step="1000">
+        </label>
+        <label>
+          Stall timeout download, ms
+          <input id="downloadStallTimeoutMs" type="number" min="1000" step="1000">
+        </label>
+        <label>
+          Timeout захвата файла, ms
+          <input id="captureTimeoutMs" type="number" min="1000" step="1000">
+        </label>
+        <label>
+          Stall timeout передачи файла, ms
+          <input id="uploadStallTimeoutMs" type="number" min="1000" step="1000">
+        </label>
+        <label>
+          Timeout служебных запросов, ms
+          <input id="uploadTimeoutMs" type="number" min="1000" step="1000">
+        </label>
+      </div>
+
+      <label>
+        Пауза между файлами, ms
+        <input id="downloadGapMs" type="number" min="0" step="100">
+      </label>
+
+      <label>
+        После recovery-refresh восстановить текст и файлы через, сек
+        <input id="responseFailureReplayDelaySec" type="number" min="3" step="1">
+      </label>
+
+      <p class="hint">Для Claude: если после автоматического refresh последний ответ всё ещё показывает «This response didn't load», расширение через указанное время восстановит последний PAP-текст и те же PAP-файлы в composer. Для других chat-adapter эта recovery-функция включается только после отдельной реализации.</p>
+
+      <p class="hint"><strong>Файлы: best-effort.</strong> Скачиваются только файлы, перечисленные в COMMAND_PUT_FILES последнего assistant-ответа текущего чата. Старые артефакты и пользовательские вложения игнорируются. Ошибка одного нужного файла не останавливает остальные.</p>
+
+      <button id="save" class="wide primary">Сохранить настройки</button>
+      <div id="popupMessage" class="message"></div>
+    </section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

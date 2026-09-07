@@ -1,0 +1,24 @@
+# Extension release 2.11.7 = 2.11.6 plus copyright headers and version bump.
+# No logic changed. The frozen 2.11.6 baseline stays as the byte proof of what
+# was installed when the slice 2 map anchors were issued.
+# sha256  path, sorted by path.
+d7cf7242045174204489fe3c8b596601ae38d4bcf4ba2888438ee8b7ab6c7040  CHAT_ADAPTER_ARCHITECTURE.md
+090b7e71567affe4eb422e24677bd360e1637ae2fb5009fbe5684a4823c0f46e  README.md
+8cbac2b533d886e9a64b08e16d2c918c412080ab0113917628a4a3e25da9828a  background.js
+d31db9b44d65c97999f5fff01afa140c13cf3d3b4b928c5a979271bdd5b0bf4e  chat-bridge.js
+485adc337b67c1d6638eb3ee094bde85b3e2eb6421f471c0bbf6b9491ace4c26  content.js
+5bec46959d5a80764e2ceee50ba41c243538a95e16ffaf538ffaaa2a80efe2e5  manifest.json
+084dfbfa2fc35089e5365fcb8fe0b4c42a86001c62bd3a3793ff6dceaaeaf564  modules/chat/adapter-core.js
+17884c200781177a3feaeab69297ce9a3a0b7238a2694180210bc94e150ead98  modules/chat/runtime-guard.js
+51dc8d60a3966e9505945f1e4e4e43cec48d74ffd579169b5338d69e3c938b9d  modules/chat/sites.js
+50116359d4e7175eb7dfb3856eb001022d8a570afb0378030b563a6e89bedd9c  modules/chat/turn-watcher.js
+cd6f9360314e4eca4d827e5ab2257f81f995228604d5478515b3966ca44e19a1  modules/chatgpt/adapter.js
+3bda7790add1e1e77376fa86c1b72ba06ce4946a02b3b955190db04f3226704b  modules/claude/adapter.js
+252c292d87eefafded61b0b635d438fde674c076e0c689e310adbf32d747051b  modules/claude/attachment-signals.js
+44efbd2a3d46a9a174a10a32be1a29a8295159625989340f25b265c806facccb  modules/claude/dom-signals.js
+af6b035aaabdd72b4768b0ddbc0839856e16df470fe836edf03fb7b9d543b650  modules/claude/last-response-recovery.js
+e3b810b72afc13884f2c74c66dd37f378d7e38fc71b653b0ba91652e25557972  modules/claude/turn-watcher.js
+543746913accc510dfb9196b5fe82a52755d6b5a5d8c3e3ab1a113d5cc4a8dfd  page-hook.js
+ea32335423f64c1c45e74c413716909672645676d48965163bcd978a3d23c4c8  popup.css
+ee9873bec552c4760a21e2dac29a7b3593d05d57775cd6e97d921504c461788a  popup.html
+a8a9aaeb9360d9d24a2a04a86bfaf0719fe40580864ee6b3cd1d6c66bf4dd4c9  popup.js
