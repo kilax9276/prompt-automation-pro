@@ -48,7 +48,7 @@ class TargetProofFixture(unittest.TestCase):
     def new_job(self, *, tab=7, page=PAGE):
         return self.dm.create_job(
             "run1",
-            {"papSource": {"tabId": tab, "url": page, "chatType": "chatgpt"},
+            {"papSource": {"tabId": tab, "url": page, "chatType": "chatgpt", "endpointId": f"ep-{tab}", "browserEpoch": "epoch-1", "conversationId": "fixture"},
              "page": page, "chatType": "chatgpt", "chatLabel": "Chat"},
             {"steps": []}, {"steps": {}}, "message", "open", 8 * 1024 * 1024, 120)
 
@@ -185,7 +185,7 @@ class AProvenDifferentTargetIsStillASkip(TargetProofFixture):
         j1 = self.sent_job()
         j2 = self.dm.create_job(
             "run1",
-            {"papSource": {"tabId": 7, "url": "", "chatType": "chatgpt"},
+            {"papSource": {"tabId": 7, "url": "", "chatType": "chatgpt", "endpointId": f"ep-{7}", "browserEpoch": "epoch-1", "conversationId": "fixture"},
              "page": "", "chatType": "chatgpt", "chatLabel": "Chat"},
             {"steps": []}, {"steps": {}}, "message", "open", 8 * 1024 * 1024, 120)
         self.assertEqual(j2["target"]["url"], "", "the writer stores the empty string")

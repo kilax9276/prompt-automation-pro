@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
 import json
 import mimetypes
 import os
@@ -185,6 +186,151 @@ class DeliveryManager:
         except Exception:
             return default
 
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        h = hashlib.sha256()
+        with path.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                h.update(chunk)
+        return h.hexdigest()
+
+    @staticmethod
+    def _manifest_digest(manifest: dict[str, Any]) -> str:
+        raw = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return hashlib.sha256(raw).hexdigest()
+
+    @staticmethod
+    def _logical_identity(run_id: str, side_effect_key: str | None = None,
+                          logical_delivery_id: str | None = None) -> tuple[str, str]:
+        side = str(side_effect_key or f'chat.send:{run_id}:primary').strip()
+        if not side:
+            raise DeliveryError('sideEffectKey is required')
+        logical = str(logical_delivery_id or '').strip()
+        if not logical:
+            logical = 'ld-' + hashlib.sha256(side.encode('utf-8')).hexdigest()[:32]
+        return logical, side
+
+    def _build_delivery_manifest(self, *, delivery_id: str, logical_delivery_id: str,
+                                 side_effect_key: str, delivery_session_id: str | None,
+                                 target: dict[str, Any], message: str,
+                                 attachments: list[dict[str, Any]]) -> dict[str, Any]:
+        manifest_attachments = []
+        for ordinal, attachment in enumerate(attachments, start=1):
+            path = Path(str(attachment.get('path') or '')).resolve()
+            if not path.is_file():
+                raise DeliveryError(f'delivery attachment missing before manifest: {attachment.get("attachmentId")}')
+            artifact_id = attachment.get('artifactId')
+            if artifact_id is not None:
+                artifact_id = str(artifact_id).strip() or None
+            source_artifact_ids = attachment.get('sourceArtifactIds')
+            if isinstance(source_artifact_ids, list):
+                source_artifact_ids = [str(x).strip() for x in source_artifact_ids if str(x).strip()]
+            else:
+                source_artifact_ids = []
+            manifest_attachments.append({
+                'ordinal': ordinal,
+                'attachmentId': str(attachment.get('attachmentId') or ''),
+                'artifactId': artifact_id,
+                'sourceArtifactIds': source_artifact_ids,
+                'outgoingFilename': str(attachment.get('name') or ''),
+                'size': int(attachment.get('size') if attachment.get('size') is not None else 0),
+                'mimeType': str(attachment.get('mimeType') or ''),
+                'sha256': self._file_sha256(path),
+            })
+        return {
+            'schemaVersion': 1,
+            'deliveryId': delivery_id,
+            'logicalDeliveryId': logical_delivery_id,
+            'sideEffectKey': side_effect_key,
+            'deliverySessionId': delivery_session_id,
+            'target': {
+                'endpointId': str(target.get('endpointId') or ''),
+                'browserEpoch': str(target.get('browserEpoch') or ''),
+                'tabId': int(target.get('tabId')),
+                'chatType': str(target.get('chatType') or ''),
+                'conversationId': str(target.get('conversationId') or ''),
+                'projectId': target.get('projectId'),
+            },
+            'message': str(message),
+            'attachments': manifest_attachments,
+        }
+
+    def _manifest_error(self, job: dict[str, Any]) -> str:
+        manifest = job.get('deliveryManifest')
+        digest = job.get('deliveryManifestSha256')
+        if not isinstance(manifest, dict):
+            return 'deliveryManifest is not an object'
+        if not isinstance(digest, str) or len(digest) != 64:
+            return 'deliveryManifestSha256 is missing'
+        if self._manifest_digest(manifest) != digest:
+            return 'deliveryManifestSha256 does not match manifest bytes'
+        if str(manifest.get('deliveryId') or '') != str(job.get('jobId') or ''):
+            return 'manifest deliveryId differs from job'
+        if str(manifest.get('logicalDeliveryId') or '') != str(job.get('logicalDeliveryId') or ''):
+            return 'manifest logicalDeliveryId differs from job'
+        if str(manifest.get('sideEffectKey') or '') != str(job.get('sideEffectKey') or ''):
+            return 'manifest sideEffectKey differs from job'
+        if (manifest.get('deliverySessionId') or None) != (job.get('deliverySessionId') or None):
+            return 'manifest deliverySessionId differs from job'
+        mtarget = manifest.get('target') if isinstance(manifest.get('target'), dict) else {}
+        target = job.get('target') if isinstance(job.get('target'), dict) else {}
+        for field in ('endpointId', 'browserEpoch', 'tabId', 'chatType', 'conversationId', 'projectId'):
+            if mtarget.get(field) != target.get(field):
+                return f'manifest target.{field} differs from job target'
+        if str(manifest.get('message') or '') != str(job.get('message') or ''):
+            return 'manifest message differs from job'
+        ma = manifest.get('attachments')
+        aa = job.get('attachments')
+        if not isinstance(ma, list) or not isinstance(aa, list) or len(ma) != len(aa):
+            return 'manifest attachments differ from job attachments'
+        by_id = {str(x.get('attachmentId') or ''): x for x in aa if isinstance(x, dict)}
+        if len(by_id) != len(aa):
+            return 'job attachments have invalid or duplicate ids'
+        for ordinal, item in enumerate(ma, start=1):
+            if not isinstance(item, dict):
+                return 'manifest attachment is not an object'
+            if item.get('ordinal') != ordinal:
+                return 'manifest attachment ordinal is invalid'
+            current = aa[ordinal - 1]
+            if not isinstance(current, dict):
+                return 'job attachment is not an object'
+            if str(item.get('attachmentId') or '') != str(current.get('attachmentId') or ''):
+                return 'manifest attachment order differs from job'
+            if item.get('outgoingFilename') != current.get('name'):
+                return 'manifest attachment outgoingFilename differs from job'
+            for field in ('size', 'mimeType'):
+                if item.get(field) != current.get(field):
+                    return f'manifest attachment {field} differs from job'
+            current_artifact_id = current.get('artifactId')
+            if current_artifact_id is not None:
+                current_artifact_id = str(current_artifact_id).strip() or None
+            if item.get('artifactId') != current_artifact_id:
+                return 'manifest attachment artifactId differs from job'
+            current_source_ids = current.get('sourceArtifactIds')
+            if isinstance(current_source_ids, list):
+                current_source_ids = [str(x).strip() for x in current_source_ids if str(x).strip()]
+            else:
+                current_source_ids = []
+            if item.get('sourceArtifactIds') != current_source_ids:
+                return 'manifest attachment sourceArtifactIds differ from job'
+            path = Path(str(current.get('path') or '')).resolve()
+            if not path.is_file():
+                return 'manifest attachment file is missing'
+            manifest_size = item.get('size')
+            if (isinstance(manifest_size, bool) or not isinstance(manifest_size, int)
+                    or manifest_size < 0):
+                return 'manifest attachment size is invalid'
+            if path.stat().st_size != manifest_size:
+                return 'manifest attachment file size changed'
+            if self._file_sha256(path) != str(item.get('sha256') or ''):
+                return 'manifest attachment file bytes changed'
+        return ''
+
+    def _require_manifest(self, job: dict[str, Any]) -> None:
+        error = self._manifest_error(job)
+        if error:
+            raise DeliveryError(f'DELIVERY_MANIFEST_INVALID: {error}')
+
     def get_job(self, run_id: str, job_id: str) -> dict[str, Any]:
         path = self.job_path(run_id, job_id)
         if not path.is_file():
@@ -197,6 +343,7 @@ class DeliveryManager:
     def save_job(self, job: dict[str, Any]) -> dict[str, Any]:
         run_id = str(job.get('runId') or '')
         job_id = str(job.get('jobId') or '')
+        self._require_manifest(job)
         job['updatedAt'] = utc_now()
         self._derive_job_status(job)
         atomic_write_json(self.job_path(run_id, job_id), job)
@@ -303,6 +450,7 @@ class DeliveryManager:
                 members.append({
                     'name': arcname,
                     'kind': item.get('kind'),
+                    'artifactId': item.get('artifactId'),
                     'originalPath': item.get('originalPath'),
                     'sourceSize': source.stat().st_size,
                 })
@@ -325,6 +473,10 @@ class DeliveryManager:
         mode: str,
         aggregate_max_bytes: int,
         stall_timeout_seconds: int,
+        *,
+        delivery_session_id: str | None = None,
+        logical_delivery_id: str | None = None,
+        side_effect_key: str | None = None,
     ) -> dict[str, Any]:
         mode = str(mode or 'open')
         if mode not in {'smart_zip', 'open', 'packed', 'single_archive'}:
@@ -339,6 +491,18 @@ class DeliveryManager:
         target_url = str(pap_source.get('url') or result.get('page') or '')
         target_chat_type = str(result.get('chatType') or pap_source.get('chatType') or 'unknown')
         target_chat_label = str(result.get('chatLabel') or pap_source.get('chatLabel') or target_chat_type or 'Unknown')
+        target_endpoint_id = str(pap_source.get('endpointId') or '').strip()
+        target_browser_epoch = str(pap_source.get('browserEpoch') or '').strip()
+        target_conversation_id = str(pap_source.get('conversationId') or '').strip()
+        target_project_id = pap_source.get('projectId')
+        if not target_endpoint_id:
+            raise DeliveryError('Run delivery target has no endpointId')
+        if not target_browser_epoch:
+            raise DeliveryError('Run delivery target has no browserEpoch')
+        if not target_conversation_id:
+            raise DeliveryError('Run delivery target has no conversationId')
+        logical_delivery_id, side_effect_key = self._logical_identity(
+            run_id, side_effect_key, logical_delivery_id)
         if target_tab_id in (None, ''):
             raise DeliveryError('Run has no papSource.tabId. Update the browser extension and create a new run.')
         try:
@@ -364,6 +528,7 @@ class DeliveryManager:
         terminal_path, terminal_name = self._materialize_terminal(run_id, files_dir)
         source_items.append({
             'kind': 'terminal_log',
+            'artifactId': None,
             'originalPath': str(self.run_dir(run_id) / 'executor' / 'run-full.log'),
             'sourcePath': str(terminal_path),
             'preferredName': terminal_name,
@@ -397,6 +562,9 @@ class DeliveryManager:
             kind: str,
             source_desc: str | None = None,
             display_name: str | None = None,
+            *,
+            artifact_id: str | None = None,
+            source_artifact_ids: list[str] | None = None,
             extra: dict[str, Any] | None = None,
         ) -> None:
             attachment_id = f'a{len(attachments)+1:03d}'
@@ -411,6 +579,8 @@ class DeliveryManager:
                 'mimeType': mime,
                 'kind': kind,
                 'source': source_desc,
+                'artifactId': str(artifact_id).strip() if artifact_id else None,
+                'sourceArtifactIds': [str(x).strip() for x in (source_artifact_ids or []) if str(x).strip()],
                 'state': 'PENDING',
                 'attempts': 0,
                 'bytesFetched': 0,
@@ -452,6 +622,7 @@ class DeliveryManager:
                         'terminal_log' if item.get('kind') == 'terminal_log' else 'report',
                         str(item.get('originalPath') or ''),
                         str(item['preferredName']),
+                        artifact_id=item.get('artifactId'),
                     )
             else:
                 part_counter = 0
@@ -473,6 +644,9 @@ class DeliveryManager:
                             'smart_bundle',
                             'automatically grouped non-archive delivery files',
                             destination.name,
+                            source_artifact_ids=[
+                                str(item.get('artifactId')) for item in group if item.get('artifactId')
+                            ],
                             extra={'members': members},
                         )
                         return
@@ -489,6 +663,7 @@ class DeliveryManager:
                             'smart_separate',
                             str(item.get('originalPath') or ''),
                             str(item['preferredName']),
+                            artifact_id=item.get('artifactId'),
                             extra={'separateReason': 'ZIP_EXCEEDS_LIMIT'},
                         )
                         return
@@ -525,6 +700,7 @@ class DeliveryManager:
                     'report_archive' if item.get('isArchive') else ('terminal_log_large' if item.get('kind') == 'terminal_log' else 'report_large'),
                     str(item.get('originalPath') or ''),
                     str(item['preferredName']),
+                    artifact_id=item.get('artifactId'),
                     extra={'separateReason': reason, 'sourceSize': source_size},
                 )
 
@@ -539,6 +715,7 @@ class DeliveryManager:
                     'report_archive' if item['isArchive'] else 'report',
                     str(item.get('originalPath') or ''),
                     item['preferredName'],
+                    artifact_id=item.get('artifactId'),
                 )
 
         elif mode == 'packed':
@@ -554,6 +731,7 @@ class DeliveryManager:
                         'report_archive',
                         str(item.get('originalPath') or ''),
                         item['preferredName'],
+                        artifact_id=item.get('artifactId'),
                     )
                 else:
                     dest = self._zip_one(src, files_dir, item['preferredName'])
@@ -562,6 +740,7 @@ class DeliveryManager:
                         'report_packed',
                         str(item.get('originalPath') or ''),
                         item['preferredName'] + '.zip',
+                        artifact_id=item.get('artifactId'),
                     )
 
         else:  # single_archive
@@ -590,7 +769,14 @@ class DeliveryManager:
                 raise DeliveryError(
                     f'aggregate archive too large: {archive_size} bytes > {aggregate_max_bytes} bytes; choose open/packed or raise limit'
                 )
-            add_attachment(aggregate, 'aggregate_archive', 'terminal log + non-archive reports', f'pap2-reports-{run_id}.tar.gz')
+            add_attachment(
+                aggregate, 'aggregate_archive', 'terminal log + non-archive reports',
+                f'pap2-reports-{run_id}.tar.gz',
+                source_artifact_ids=[
+                    str(item.get('artifactId')) for item in source_items[1:]
+                    if not item.get('isArchive') and item.get('artifactId')
+                ],
+            )
             for item in source_items[1:]:
                 if not item['isArchive']:
                     continue
@@ -601,6 +787,7 @@ class DeliveryManager:
                     'report_archive',
                     str(item.get('originalPath') or ''),
                     item['preferredName'],
+                    artifact_id=item.get('artifactId'),
                 )
 
         created = utc_now()
@@ -623,11 +810,18 @@ class DeliveryManager:
             },
             'stallTimeoutSeconds': stall_timeout_seconds,
             'target': {
+                'endpointId': target_endpoint_id,
+                'browserEpoch': target_browser_epoch,
                 'tabId': target_tab_id,
                 'url': target_url,
                 'chatType': target_chat_type,
+                'conversationId': target_conversation_id,
+                'projectId': target_project_id,
                 'chatLabel': target_chat_label,
             },
+            'logicalDeliveryId': logical_delivery_id,
+            'sideEffectKey': side_effect_key,
+            'deliverySessionId': delivery_session_id,
             'message': final_message,
             'messageState': 'PENDING',
             'messageError': None,
@@ -646,6 +840,16 @@ class DeliveryManager:
             'missingReports': missing,
             'reportCount': len(artifacts),
         }
+        job['deliveryManifest'] = self._build_delivery_manifest(
+            delivery_id=job_id,
+            logical_delivery_id=logical_delivery_id,
+            side_effect_key=side_effect_key,
+            delivery_session_id=delivery_session_id,
+            target=job['target'],
+            message=final_message,
+            attachments=attachments,
+        )
+        job['deliveryManifestSha256'] = self._manifest_digest(job['deliveryManifest'])
         saved = self.save_job(job)
         saved['supersededOlderJobs'] = self.supersede_older_jobs_for_tab(target_tab_id, run_id, job_id)
         return self.save_job(saved)
@@ -1208,6 +1412,8 @@ class DeliveryManager:
                         'mimeType': mime,
                         'kind': source_attachment.get('kind'),
                         'source': source_attachment.get('source'),
+                        'artifactId': source_attachment.get('artifactId'),
+                        'sourceArtifactIds': list(source_attachment.get('sourceArtifactIds') or []),
                         'state': 'PENDING',
                         'attempts': 0,
                         'bytesFetched': 0,
@@ -1220,6 +1426,9 @@ class DeliveryManager:
                     })
 
                 created = utc_now()
+                recovery_side_effect = f'chat.send:recovery:{source_run_id}:{source_job_id}'
+                recovery_logical_id, recovery_side_effect = self._logical_identity(
+                    source_run_id, recovery_side_effect, None)
                 job = {
                     'schemaVersion': 1,
                     'jobId': new_job_id,
@@ -1233,11 +1442,18 @@ class DeliveryManager:
                     'packagingPolicy': source.get('packagingPolicy'),
                     'stallTimeoutSeconds': source.get('stallTimeoutSeconds') or 120,
                     'target': {
+                        'endpointId': target.get('endpointId'),
+                        'browserEpoch': target.get('browserEpoch'),
                         'tabId': int(tab_id),
                         'url': target_url or page_url,
-                        'chatType': (source.get('target') or {}).get('chatType') if isinstance(source.get('target'), dict) else None,
-                        'chatLabel': (source.get('target') or {}).get('chatLabel') if isinstance(source.get('target'), dict) else None,
+                        'chatType': target.get('chatType'),
+                        'conversationId': target.get('conversationId'),
+                        'projectId': target.get('projectId'),
+                        'chatLabel': target.get('chatLabel'),
                     },
+                    'logicalDeliveryId': recovery_logical_id,
+                    'sideEffectKey': recovery_side_effect,
+                    'deliverySessionId': source.get('deliverySessionId'),
                     'message': str(source.get('message') or ''),
                     'messageState': 'PENDING',
                     'messageError': None,
@@ -1268,6 +1484,16 @@ class DeliveryManager:
                     'recoveryRequestedAt': created,
                 }
 
+                job['deliveryManifest'] = self._build_delivery_manifest(
+                    delivery_id=new_job_id,
+                    logical_delivery_id=recovery_logical_id,
+                    side_effect_key=recovery_side_effect,
+                    delivery_session_id=job.get('deliverySessionId'),
+                    target=job['target'],
+                    message=job['message'],
+                    attachments=attachments,
+                )
+                job['deliveryManifestSha256'] = self._manifest_digest(job['deliveryManifest'])
                 saved = self.save_job(job)
                 saved['supersededOlderJobs'] = self.supersede_older_jobs_for_tab(
                     int(tab_id),
@@ -1342,29 +1568,33 @@ class DeliveryManager:
 
         return changed
 
+    @staticmethod
+    def _delivery_identity(job: dict[str, Any]) -> tuple[str, str] | None:
+        logical = job.get('logicalDeliveryId')
+        side = job.get('sideEffectKey')
+        if not isinstance(logical, str) or not logical.strip():
+            return None
+        if not isinstance(side, str) or not side.strip():
+            return None
+        return logical.strip(), side.strip()
+
     def supersede_older_jobs_for_tab(self, target_tab_id: int, keep_run_id: str, keep_job_id: str) -> int:
-        """Retire earlier work for this tab, but never over a lease.
+        """Retire only older attempts of the same logical delivery.
 
-        Superseding is terminal, and a terminal job stops accepting events: its
-        RELEASE is dropped by the idempotent early return, `recover_expired_leases`
-        skips terminal jobs, and the drain then reads the pair as a contradiction
-        it can never resolve — one new Prepare while a delivery was claimed left
-        the boundary refusing for ever.
-
-        Clearing the lease instead is not the alternative it looks like: the
-        claim was live, so its outcome is unknown, and erasing the trace is
-        exactly the substitution of absence for the unknown this block exists to
-        remove. So the older job keeps its lease and its identity, and delivery
-        for the tab stays single-flight until that lease ends — `poll_for_tab`
-        refuses to hand out the newer job in the meantime.
-
-        Recovery runs first so an expired lease is decided after it has been
-        recovered, not while it still looks outstanding.
+        Slice 2 temporarily retired every queued job for a tab.  Slice 4 makes
+        supersession about logical side-effect identity instead: two independent
+        deliveries to one conversation survive and are merely serialized by the
+        browser-plane lease.  The lease/UNKNOWN protections introduced in slice
+        2 remain unchanged.
         """
         changed = 0
         if not self.data_dir.is_dir():
             return changed
         with self.lock:
+            keep = self.get_job(keep_run_id, keep_job_id)
+            keep_identity = self._delivery_identity(keep)
+            if keep_identity is None:
+                return 0
             self.recover_expired_leases()
             for run_dir in self.data_dir.iterdir():
                 if not run_dir.is_dir():
@@ -1383,24 +1613,27 @@ class DeliveryManager:
                         continue
                     verdict, _why = self.classify_target(job, tab_id=target_tab_id)
                     if verdict != self.TARGET_MATCH:
-                        # Proven elsewhere, or an address nobody can read.
-                        # Neither is a job this call may retire: the second
-                        # would be a terminal write decided by a shrug.
+                        continue
+                    if self._delivery_identity(job) != keep_identity:
+                        # Same browser target does not mean same logical effect.
                         continue
                     if str(job.get('status') or '') in TERMINAL_JOB_STATES:
                         continue
+                    if self._manifest_error(job):
+                        # Damaged identity/manifest is evidence, not a candidate
+                        # for a terminal supersede write.
+                        continue
                     kind, _detail = self.classify_lease(job)
                     if kind != self.LEASE_NONE:
-                        # ACTIVE: a client is performing this delivery now.
-                        # EXPIRED: it survived the recovery pass above, so it
-                        # belongs to another dispatch epoch and its outcome is
-                        # not ours to declare.
-                        # INVALID: contradictory evidence; superseding it would
-                        # bury the only record that something was lost.
                         continue
                     job['status'] = 'SUPERSEDED'
                     job['supersededAt'] = utc_now()
-                    job['supersededBy'] = {'runId': keep_run_id, 'jobId': keep_job_id}
+                    job['supersededBy'] = {
+                        'runId': keep_run_id,
+                        'jobId': keep_job_id,
+                        'logicalDeliveryId': keep_identity[0],
+                        'sideEffectKey': keep_identity[1],
+                    }
                     self.save_job(job)
                     changed += 1
         return changed
@@ -1605,6 +1838,23 @@ class DeliveryManager:
         verdict, why = self.classify_target(job, tab_id=tab_id)
         if verdict != self.TARGET_MATCH:
             raise DeliveryError(f'wrong tabId for delivery job: {why or verdict}')
+
+    def _require_target_endpoint(self, job: dict[str, Any], endpoint_id: Any) -> None:
+        """Require the endpoint identity proven by the browser barrier.
+
+        tabId is only a browser-local locator and can be reused after a tab
+        closes.  When a caller supplies endpointId, a different generation of
+        the same tab must not claim, report on, or read an older delivery.
+        """
+        if endpoint_id is None:
+            return
+        requested = str(endpoint_id or '').strip()
+        target = job.get('target') if isinstance(job.get('target'), dict) else {}
+        stored = str(target.get('endpointId') or '').strip()
+        if not requested or not stored:
+            raise DeliveryError('delivery target endpoint cannot be proved')
+        if requested != stored:
+            raise DeliveryError('delivery job belongs to another endpoint')
 
     def classify_target(self, job: dict[str, Any], *, tab_id: int,
                         page_url: str = '') -> tuple[str, str]:
@@ -2031,7 +2281,7 @@ class DeliveryManager:
 
         return changed
 
-    def poll_for_tab(self, tab_id: int, page_url: str) -> dict[str, Any] | None:
+    def poll_for_tab(self, tab_id: int, page_url: str, endpoint_id: str | None = None) -> dict[str, Any] | None:
         mode = str(self.rollout_state().get('mode') or ROLLOUT_OPEN)
         if mode in (ROLLOUT_DRAIN, ROLLOUT_BARRIER):
             # No new work is handed out and no new claim may be taken. Events
@@ -2069,7 +2319,7 @@ class DeliveryManager:
             # rule and the retirement do not overlap: nothing with an
             # outstanding outcome can be retired from this call.
             self._retire_superseded_for_tab(tab_id)
-            return self._select_job_for_tab(tab_id, page_url)
+            return self._select_job_for_tab(tab_id, page_url, endpoint_id)
 
     def prepare_order_for_tab(self, tab_id: int) -> tuple[list[dict[str, Any]] | None, str]:
         """This tab's open deliveries, newest Prepare first — or a refusal.
@@ -2106,6 +2356,13 @@ class DeliveryManager:
                 continue
             if str(job.get('status') or '') in TERMINAL_JOB_STATES | {PAUSED_JOB_STATE}:
                 continue
+            manifest_error = self._manifest_error(job)
+            if manifest_error:
+                return None, (f"delivery manifest cannot be proved: run={job.get('runId')} "
+                              f"job={job.get('jobId')}: {manifest_error}")
+            if self._delivery_identity(job) is None:
+                return None, (f"logical delivery identity cannot be read: "
+                              f"run={job.get('runId')} job={job.get('jobId')}")
             created = decision_dt(job.get('createdAt'))
             if created is None:
                 return None, (f"createdAt is not a timezone-aware timestamp: "
@@ -2119,24 +2376,28 @@ class DeliveryManager:
         return [job for _created, job in rows], ''
 
     def _retire_superseded_for_tab(self, tab_id: int) -> int:
-        """Retire everything this tab has queued except the newest Prepare.
+        """Redeem deferred supersession inside each logical-delivery group.
 
-        Reached only after the gate has proved the tab holds no lease, and it
-        goes through `supersede_older_jobs_for_tab` rather than writing the
-        status itself, so the lease classification is applied a second time by
-        the same code. A trace that appears between the two checks stops the
-        retirement exactly as it stops a fresh one.
+        The tab gate has proved there is no outstanding lease.  We still do
+        not collapse independent deliveries into one: each identity keeps its
+        newest Prepare, and only older attempts of that identity are retired.
         """
         order, _reason = self.prepare_order_for_tab(tab_id)
         if not order:
-            # Refused, or nothing open. Either way nothing is retired: a
-            # terminal write on unprovable evidence is the defect, not the fix.
             return 0
-        newest = order[0]
-        return self.supersede_older_jobs_for_tab(
-            tab_id, str(newest.get('runId') or ''), str(newest.get('jobId') or ''))
+        newest_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+        for job in order:  # newest first
+            identity = self._delivery_identity(job)
+            if identity is None:
+                return 0
+            newest_by_identity.setdefault(identity, job)
+        changed = 0
+        for newest in newest_by_identity.values():
+            changed += self.supersede_older_jobs_for_tab(
+                tab_id, str(newest.get('runId') or ''), str(newest.get('jobId') or ''))
+        return changed
 
-    def _select_job_for_tab(self, tab_id: int, page_url: str) -> dict[str, Any] | None:
+    def _select_job_for_tab(self, tab_id: int, page_url: str, endpoint_id: str | None = None) -> dict[str, Any] | None:
         """The newest job for this tab that owes nothing and is owed nothing.
 
         The order comes from `prepare_order_for_tab`, which proves it, so a
@@ -2155,6 +2416,11 @@ class DeliveryManager:
             return None
         for job in order:                       # newest proven Prepare first
             target = job.get('target') if isinstance(job.get('target'), dict) else {}
+            if endpoint_id is not None and str(target.get('endpointId') or '') != str(endpoint_id):
+                # tabId is a browser-local locator and may be reused.  Once S4
+                # has resolved a delivery to endpointId, a newer endpoint that
+                # happens to occupy the same tab must not receive the old job.
+                continue
             target_url = str(target.get('url') or '')
             if target_url and page_url and target_url.split('#', 1)[0] != page_url.split('#', 1)[0]:
                 continue
@@ -2187,6 +2453,13 @@ class DeliveryManager:
             # perfectly good tab number and hand the job to it, and `int('bad')`
             # left through an exception instead of a refusal.
             self._require_target_tab(job, body.get('tabId'))
+            self._require_target_endpoint(
+                job, body.get('endpointId') if 'endpointId' in body else None)
+            # The manifest is the immutable authorization envelope for the
+            # external delivery.  Prove it before terminal idempotence or any
+            # event mutation: a caller may not use a damaged persisted job as
+            # either a successful no-op or a new side-effect attempt.
+            self._require_manifest(job)
 
             if str(job.get('status') or '') in TERMINAL_JOB_STATES | {PAUSED_JOB_STATE}:
                 return job
@@ -2353,6 +2626,7 @@ class DeliveryManager:
     def retry_failed(self, run_id: str, job_id: str) -> dict[str, Any]:
         with self.lock:
             job = self.get_job(run_id, job_id)
+            self._require_manifest(job)
             is_paused = str(job.get('status') or '') == PAUSED_JOB_STATE
             changed = 0
 
@@ -2388,6 +2662,7 @@ class DeliveryManager:
     def request_send(self, run_id: str, job_id: str) -> dict[str, Any]:
         with self.lock:
             job = self.get_job(run_id, job_id)
+            self._require_manifest(job)
             bad = [x for x in job.get('attachments') or [] if x.get('state') != 'UPLOADED']
             if bad:
                 raise DeliveryError('not all available attachments are uploaded')
@@ -2398,7 +2673,7 @@ class DeliveryManager:
             return self.save_job(job)
 
     def attachment_chunk(self, run_id: str, job_id: str, attachment_id: str, offset: int, limit: int,
-                         *, tab_id: int, lease_token: str) -> dict[str, Any]:
+                         *, tab_id: int, lease_token: str, endpoint_id: str | None = None) -> dict[str, Any]:
         """Attachment bytes, to the tab that holds the lease and to nobody else.
 
         Both proofs are required arguments. They used to default to None and
@@ -2410,6 +2685,8 @@ class DeliveryManager:
         """
         job = self.get_job(run_id, job_id)
         self._require_target_tab(job, tab_id)
+        self._require_target_endpoint(job, endpoint_id)
+        self._require_manifest(job)
         # A live lease held by this caller. Reading bytes is work, and work
         # requires a claim — otherwise a drain that hands out no new jobs
         # still hands out new pieces of them.

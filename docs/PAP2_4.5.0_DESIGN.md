@@ -1044,11 +1044,16 @@ Reflink допустим там, где файловая система гара
 в хранилище появился более новый артефакт с тем же именем:
 
 ```
-deliveryId
-attachments: ordinal, artifactId, sha256, outgoingFilename, size
+deliveryId, logicalDeliveryId, sideEffectKey, deliverySessionId, target
+attachments: ordinal, artifactId, sourceArtifactIds, sha256, outgoingFilename, size
 ```
 
 Именно он обслуживает выгрузку файлов в том виде, в каком они ушли в чат.
+`artifactId` сохраняет происхождение при отношении 1:1; если один исходящий
+архив собран из нескольких report artifacts, `sourceArtifactIds` хранит их
+упорядоченный набор, а `artifactId=null`. Сгенерированный terminal log также
+не получает выдуманный artifact-store id. `ordinal` и `outgoingFilename`
+относятся к фактически отправляемому файлу, а не к имени исходного snapshot.
 
 ### Строки приёмки
 
@@ -2646,6 +2651,15 @@ Run без снимка и нет условий входа в срез 7 по �
 | 2026-09-08 | перед записью `selectEndpoint` заново проверяет live session, enabled profile/binding и текущий ONLINE endpoint с совпадающими chatType/conversationId/projectId | HTTP-аутентификация оператора не доказывает право на конкретный устаревший или чужой endpoint; отказ обязан предшествовать записи |
 | 2026-09-08 | session без `endpointSelections` читается как пустая; pins/approved значения не мигрируют в relation | отсутствие нового поля у уже созданной session — совместимость формата, а не разрешение восстановить старую policy |
 | 2026-09-08 | `MAP-028` не переписывает `authorize_delivery` и `select_for_binding`; эти обязанности остаются у `MAP-018`/`MAP-034` | первая попытка шага 3 полезла в selection-policy среза 4; карта является границей объёма, поэтому преждевременная интеграция была откачена |
+
+| 2026-09-08 | S4 delivery re-authorization использует current ProfileSession только при доказанном совпадении profileId, snapshotDigest, bindingId, role и identity; run.sessionId остаётся неизменяемым provenance | перенос действия между сессиями не должен переписывать историю Run или наследовать изменившуюся топологию |
+| 2026-09-08 | `evaluate` и `select` стали единственной endpoint policy: явный session-owned endpoint остаётся sticky при OFFLINE/identity mismatch и освобождается только при CLOSED/EXPIRED | silent reselection при временном исчезновении возвращает старый глобальный pin под новым именем |
+| 2026-09-08 | автоматический выбор после CLOSED/EXPIRED не переписывает `endpointSelections`; poll применяет то же правило release к старой relation | иначе authorize_delivery выбирал новый endpoint, а poll немедленно блокировал тот же подготовленный job старой relation |
+| 2026-09-08 | retry существующего delivery job проверяет неизменность разрешённого endpoint до любой mutation | retry остаётся той же подготовленной попыткой и не вправе тихо перенести immutable manifest на другую browser identity |
+| 2026-09-08 | immutable delivery manifest связывает deliveryId/logicalDeliveryId/sideEffectKey/session/target/message и для каждого outgoing attachment фиксирует ordinal, artifact provenance, outgoingFilename, size и sha256 | последующая выгрузка обязана восстанавливать именно подготовленные байты и имена, а не текущий report snapshot |
+| 2026-09-08 | bundle provenance хранит ordered `sourceArtifactIds`; для terminal log не синтезируется фиктивный artifact-store id | один outgoing archive может происходить из нескольких report artifacts, а выдуманный singular artifactId терял бы происхождение |
+| 2026-09-08 | нулевой attachment size является каноническим значением и не подменяется `-1` truthiness-fallback | пустой файл — законный артефакт; `0` не означает отсутствие размера |
+| 2026-09-08 | S4 supersede сравнивает пару logicalDeliveryId/sideEffectKey и сохраняет S2 lease/single-flight interlock | две независимые доставки в один conversation должны пережить Prepare друг друга, но browser plane всё ещё не исполняет их одновременно |
 
 ### Инвариант фикстур
 

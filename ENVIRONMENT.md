@@ -12,7 +12,7 @@
 
     bash RUN_TESTS.sh
 
-Ожидается `226 passed, 64 subtests passed`.
+Ожидается `274 passed, 64 subtests passed`.
 
 Оба набора обязаны идти в одном процессе против одного релиза: каждый файл
 кладёт свой каталог релиза в `sys.path` и импортирует `profile_store`, а Python
@@ -29,7 +29,7 @@
     cd tools
     python3 verify_inventory.py     # 177 проверок
     python3 verify_overlaps.py      # 10 проверок
-    python3 verify_map.py           # 212 проверок
+    python3 verify_map.py           # 214 проверок
 
 Все три обязаны давать `failures=0`. `verify_map.py` в том числе запускает
 `extract_inventory.py` и требует, чтобы тот побайтно воспроизвёл приложенную

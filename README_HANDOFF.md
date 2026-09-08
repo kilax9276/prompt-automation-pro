@@ -1,39 +1,58 @@
-# PAP2 4.5.0 — срез 2, шаг 3 MAP-028: рабочее дерево для review
+# PAP2 4.5.0 — срез 2, шаг 4 / S4 delivery semantics: review-кандидат
 
-Полный контекст — в `PAP2_S2_HANDOFF.md` в этом же каталоге.
+Полный контекст — в `PAP2_S2_HANDOFF.md`.
 
-## Проверка, что база рабочая
+## Проверка
 
     bash RUN_TESTS.sh
 
-Ожидается `247 passed, 64 subtests passed`.
+Ожидается `274 passed, 64 subtests passed`.
 
-Оба набора тестов обязаны идти в одном процессе против одного релиза: каждый
-файл кладёт свой каталог релиза в `sys.path` и импортирует `profile_store`,
-а Python кеширует модуль — при смешивании релизов молча тестируется тот, кто
-импортировался первым. `RUN_TESTS.sh` это фиксирует.
+    python tools/verify_inventory.py
+    python tools/verify_overlaps.py
+    python tools/verify_map.py
 
-## Что здесь лежит
+Ожидается соответственно `177/0`, `10/0`, `214/0 VERIFIED_CLEAN`.
 
-    console_releases/4.5.0-s1/    закрытый срез 1, рабочее основание карты
-    console_releases/4.5.0-s2/    кандидат среза 2 — здесь идёт работа
-    receivers/2.11.0-s1/          receiver закрытого среза 1
-    extension_releases/2.11.6/    замороженный байтовый baseline расширения
-    tests/                        247 тестов
-    diff/                         три патча относительно коммита 8fc773c
-    docs/PAP2_4.5.0_DESIGN.md     дизайн, 2667 строк, журнал решений
-    PAP2_4.5.0_IMPLEMENTATION_MAP.md   карта точек врезки
-    tools/                        цепочка проверки карты
+## Основание
 
-## Git
+Ветка `s2-block25` опубликована до commit
+`b7d39e350cf47f7b3ef6d6a34f63990f839257db` (MAP-028), parent `d943c11`.
+`main` не сдвинут; rollout отсутствует; pro2 продолжает работать на slice 1.
 
-Принятый блок 2+5 зафиксирован в настоящем репозитории отдельной веткой
-`s2-block25`: `d943c11fac675fa3125f92aec23b8ff90363e5e0`, parent `8fc773c`.
-`main` не сдвинут. Текущий MAP-028 поверх него **ещё не закоммичен** и не
-выкачен на стенд.
+Текущий S4 candidate поверх MAP-028 **не закоммичен и не выкачен**.
 
-## Чего здесь нет
+## Текущая дельта
 
-`data/`, `config/`, `runtime/`, `logs/` — состояние выполнения, содержимое
-чатов, профили и секреты конкретного развёртывания. Тесты создают всё нужное
-во временных каталогах.
+Обязанности:
+
+- `MAP-018` — re-authorization через совместимую current ProfileSession без
+  переписывания Run provenance;
+- `MAP-034` — `EndpointRegistry.evaluate/select`, session-owned sticky policy,
+  явная ambiguity;
+- `MAP-035` — endpoint-resolved immutable delivery manifest,
+  logicalDeliveryId/sideEffectKey, exact outgoing bytes/names/artifact provenance;
+- `MAP-036` — supersede только предыдущей попытки той же logical delivery с
+  сохранением S2 lease/single-flight safety.
+
+`tests/test_slice4_delivery_semantics.py`: 23 PASS на кандидате. Тот же файл
+обязан быть RED на точных байтах MAP-028 Review 2; evidence лежит в каталоге
+текущего review-пакета.
+
+Review 2 восстанавливает четыре прежние recovery-provenance regression-оси,
+которые Review 1 ошибочно заменил/удалил при адаптации tab-wide supersede к
+logical-delivery supersede. Продуктовый S4-код при этом не меняется: terminal
+состояние для этих проверок теперь создаётся настоящим writer-путём через новую
+попытку с тем же `logicalDeliveryId`/`sideEffectKey`. `test_slice2_review27.py`
+снова удерживает malformed `pausedAt`, unknown `sendState` и unresolved
+`SEND_REQUESTED`; `test_slice2_review26_audit.py` снова удерживает правило, что
+ретированный недоставленный replay не закрывает source.
+
+`ACC-S4-001…008 = PASS`. Это development/code evidence, не live/browser
+приёмка всего slice 2: rollout по-прежнему отсутствует.
+
+## Что не входит
+
+`MAP-049`/`MAP-050` (окончательная binding/resolver schema cleanup), extension
+steps 6/7 и rollout integration step 8 не выполняются в этом review.
+Evidence-каталог review не является commit-worthy product delta.

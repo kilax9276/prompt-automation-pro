@@ -47,7 +47,7 @@ class RecoveryReplayFixture(unittest.TestCase):
     def sent_source(self, *, tab=7, token="tok"):
         job = self.dm.create_job(
             "run1",
-            {"papSource": {"tabId": tab, "url": PAGE, "chatType": "chatgpt"},
+            {"papSource": {"tabId": tab, "url": PAGE, "chatType": "chatgpt", "endpointId": f"ep-{tab}", "browserEpoch": "epoch-1", "conversationId": "fixture"},
              "page": PAGE, "chatType": "chatgpt", "chatLabel": "Chat"},
             {"steps": []}, {"steps": {}}, "message", "open", 8 * 1024 * 1024, 120)
         self.dm.update_from_client("run1", job["jobId"], {
@@ -145,7 +145,7 @@ class OrdinaryJobsAreNotDamagedReplays(RecoveryReplayFixture):
         source = self.sent_source()
         self.dm.create_job(
             "run1",
-            {"papSource": {"tabId": 7, "url": PAGE, "chatType": "chatgpt"},
+            {"papSource": {"tabId": 7, "url": PAGE, "chatType": "chatgpt", "endpointId": f"ep-{7}", "browserEpoch": "epoch-1", "conversationId": "fixture"},
              "page": PAGE, "chatType": "chatgpt", "chatLabel": "Chat"},
             {"steps": []}, {"steps": {}}, "another", "open", 8 * 1024 * 1024, 120)
 

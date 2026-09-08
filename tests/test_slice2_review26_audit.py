@@ -43,7 +43,7 @@ class ReplayLifecycleAudit(unittest.TestCase):
         dm = manager or self.dm
         return dm.create_job(
             "run1",
-            {"papSource": {"tabId": tab, "url": PAGE, "chatType": "chatgpt"},
+            {"papSource": {"tabId": tab, "url": PAGE, "chatType": "chatgpt", "endpointId": f"ep-{tab}", "browserEpoch": "epoch-1", "conversationId": "fixture"},
              "page": PAGE, "chatType": "chatgpt", "chatLabel": "Chat"},
             {"steps": []}, {"steps": {}}, message, "open", 8 * 1024 * 1024, 120)
 
@@ -60,6 +60,24 @@ class ReplayLifecycleAudit(unittest.TestCase):
         return dm.create_recovery_replay(
             tab_id=7, page_url=PAGE, source_run_id=source["runId"],
             source_job_id=source["jobId"], reason="audit")
+
+    def supersede_same_logical(self, replay, manager=None, message="replacement"):
+        dm = manager or self.dm
+        target = replay["target"]
+        return dm.create_job(
+            replay["runId"],
+            {"papSource": {
+                "tabId": target["tabId"], "url": target["url"],
+                "chatType": target["chatType"], "endpointId": target["endpointId"],
+                "browserEpoch": target["browserEpoch"],
+                "conversationId": target["conversationId"],
+                "projectId": target.get("projectId"),
+            }, "page": target["url"], "chatType": target["chatType"], "chatLabel": "Chat"},
+            {"steps": []}, {"steps": {}}, message, "open", 8 * 1024 * 1024, 120,
+            delivery_session_id=replay.get("deliverySessionId"),
+            logical_delivery_id=replay["logicalDeliveryId"],
+            side_effect_key=replay["sideEffectKey"],
+        )
 
     # ---- finding 1 -------------------------------------------------------
 
@@ -102,25 +120,37 @@ class ReplayLifecycleAudit(unittest.TestCase):
     # ---- finding 2 -------------------------------------------------------
 
     def test_a_replay_retired_before_delivery_does_not_end_recovery_for_ever(self):
-        """A replay superseded while still PENDING was never delivered.
+        """A same-logical retry may retire the old replay without delivering it."""
+        source = self.sent()
+        first = self.replay_for(source)
+        self.supersede_same_logical(first, message="same logical retry")
+        retired = self.dm.get_job(first["runId"], first["jobId"])
+        self.assertEqual(retired["status"], "SUPERSEDED")
+        self.assertEqual(retired["messageState"], "PENDING")
+        self.assertEqual(retired["sendState"], "NOT_REQUESTED")
 
-        Returning it as the existing replay means the source can never get
-        another one: the answer is terminal, and the delivery it was created
-        for never happened.
+        again = self.replay_for(source)
+        self.assertNotEqual(
+            again["jobId"], first["jobId"],
+            "an undelivered retired replay must not end recovery for its source")
+
+    def test_a_replay_is_not_retired_by_an_unrelated_logical_delivery(self):
+        """Slice 4 scopes supersession to one logical side effect.
+
+        A recovery replay is an intentional new logical delivery.  A later
+        ordinary Prepare for the same tab must not retire it merely because the
+        browser locator matches; the replay remains the idempotent result for
+        its source.
         """
         source = self.sent()
         first = self.replay_for(source)
         self.prepare(self.dm, "a new prepare for the same tab")
-        retired = self.dm.get_job(first["runId"], first["jobId"])
-        self.assertEqual(retired["status"], "SUPERSEDED")
-        self.assertEqual(retired["messageState"], "PENDING",
-                         "the retired replay was never inserted into the chat")
+        stored = self.dm.get_job(first["runId"], first["jobId"])
+        self.assertEqual(stored["status"], "QUEUED")
+        self.assertEqual(stored["messageState"], "PENDING")
 
         again = self.replay_for(source)
-
-        self.assertNotEqual(
-            again["jobId"], first["jobId"],
-            "an undelivered retired replay must not be returned as the existing one")
+        self.assertEqual(again["jobId"], first["jobId"])
 
 
 if __name__ == "__main__":

@@ -321,77 +321,135 @@ class RunProfileContext:
                 )
         return current
 
+    def _delivery_session(self, ctx: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any] | None:
+        """Resolve whose live session may authorize this outgoing action.
+
+        `run.sessionId` is immutable provenance.  A stopped session never
+        re-authorizes work by itself; an old Run may use the *current* session
+        only when the material topology that matters to the action is provably
+        the same.  A Run created without a session remains a first-class
+        sessionless route.
+        """
+        provenance_session_id = str(ctx.get("sessionId") or "").strip()
+        if not provenance_session_id:
+            return None
+
+        profile_id = str(ctx.get("profileId") or "")
+        original = self.sessions.get(provenance_session_id)
+        candidate = original if isinstance(original, dict) and str(original.get("state") or "") in self.sessions.LIVE_STATES else None
+        if candidate is None:
+            try:
+                candidate = self.sessions.current(profile_id)
+            except ProfileError as exc:
+                raise ProfileAuthorizationError(
+                    "DELIVERY_SESSION_DECISION_REQUIRED", str(exc),
+                    {"profileContext": ctx, "binding": binding}) from exc
+
+        if not isinstance(candidate, dict):
+            raise ProfileAuthorizationError(
+                "DELIVERY_SESSION_DECISION_REQUIRED",
+                "The Run's session is stopped and no compatible current session exists",
+                {"profileContext": ctx, "binding": binding,
+                 "provenanceSessionId": provenance_session_id})
+
+        reasons: list[str] = []
+        if str(candidate.get("profileId") or "") != profile_id:
+            reasons.append("profileId")
+        if str(candidate.get("snapshotDigest") or "") != str(ctx.get("snapshotDigest") or ""):
+            reasons.append("snapshotDigest")
+        binding_id = str(binding.get("bindingId") or "")
+        if binding_id not in {str(x) for x in candidate.get("bindingIds") or []}:
+            reasons.append("bindingId")
+
+        # For the source binding the immutable Run context carries role and
+        # normalized chat identity directly.  For another role,
+        # _resolve_delivery_binding already proves that the chat-binding digest
+        # is unchanged; if it changed, that helper refuses rather than guessing
+        # which historical target the Run meant.
+        if binding_id == str(ctx.get("bindingId") or ""):
+            if str(binding.get("role") or "") != str(ctx.get("role") or ""):
+                reasons.append("role")
+            for field in ("chatType", "conversationId", "projectId"):
+                if str(binding.get(field) or "") != str(ctx.get(field) or ""):
+                    reasons.append(field)
+
+        if reasons:
+            raise ProfileAuthorizationError(
+                "DELIVERY_SESSION_DECISION_REQUIRED",
+                "Current ProfileSession is not compatible with the Run provenance",
+                {"profileContext": ctx, "binding": binding,
+                 "provenanceSessionId": provenance_session_id,
+                 "candidateSessionId": candidate.get("sessionId"),
+                 "mismatches": sorted(set(reasons))})
+        return candidate
+
+    def _run_delivery_config(self, ctx: dict[str, Any]) -> dict[str, Any]:
+        """Delivery policy from the immutable Run snapshot, never live config."""
+        digest = str(ctx.get("snapshotDigest") or "")
+        if not digest:
+            return {}
+        try:
+            loaded = self.snapshots.load(digest)
+        except Exception as exc:
+            raise ProfileAuthorizationError(
+                "PROFILE_SNAPSHOT_UNAVAILABLE",
+                "Run profile snapshot is unavailable for delivery",
+                {"profileContext": ctx}) from exc
+        profile = loaded.get("profile") if isinstance(loaded, dict) else None
+        if not isinstance(profile, dict):
+            raise ProfileAuthorizationError(
+                "PROFILE_SNAPSHOT_UNAVAILABLE",
+                "Run profile snapshot has no profile",
+                {"profileContext": ctx})
+        delivery = profile.get("delivery")
+        return dict(delivery) if isinstance(delivery, dict) else {}
+
     def authorize_delivery(self, run_id: str, target_role: str | None = None, allow_wait: bool = False) -> dict[str, Any]:
         ctx = self.authorize_execution(run_id)
         binding = self._resolve_delivery_binding(ctx, target_role)
-        selection = self.endpoints.select_for_binding(binding)
+        delivery_session = self._delivery_session(ctx, binding)
+        selected_endpoint_id = None
+        if delivery_session is not None:
+            relation = self.sessions.selection(
+                str(delivery_session.get("sessionId") or ""),
+                str(binding.get("bindingId") or ""),
+            )
+            if relation is not None:
+                selected_endpoint_id = str(relation.get("endpointId") or "").strip() or None
+
+        selection = self.endpoints.select_for_binding(binding, selected_endpoint_id)
         status = str(selection.get("status") or "WAITING_FOR_ENDPOINT")
+        base = {
+            "profileContext": ctx,
+            "binding": binding,
+            "selection": selection,
+            "deliverySessionId": (delivery_session or {}).get("sessionId") if delivery_session else None,
+        }
         if status == "READY":
-            return {"profileContext": ctx, "binding": binding, "endpoint": selection["endpoint"], "selection": selection, "waiting": False}
+            return {**base, "endpoint": selection["endpoint"], "waiting": False}
+
         if status == "WAITING_FOR_ENDPOINT" and allow_wait:
-            try:
-                profile = self.profiles.get_profile(str(ctx.get("profileId") or ""), include_prompts=False)
-            except Exception:
-                raise ProfileAuthorizationError("PROFILE_DISABLED", "Profile is unavailable")
-            delivery = profile.get("delivery") if isinstance(profile.get("delivery"), dict) else {}
+            delivery = self._run_delivery_config(ctx)
             if str(delivery.get("offlineTargetPolicy") or "wait") == "fail":
-                raise ProfileAuthorizationError("ENDPOINT_OFFLINE", "Target endpoint is offline", {"binding": binding, **selection})
-            target_tab = selection.get("pinnedTabId")
-            if target_tab in (None, ""):
-                target_tab = ctx.get("sourceTabId")
-            try:
-                target_tab = int(target_tab)
-            except Exception:
-                raise ProfileAuthorizationError("WAITING_FOR_ENDPOINT", "Target endpoint is offline and no safe tabId is available", {"binding": binding, **selection})
-            # A historical tabId is not a durable endpoint identity. Chrome may
-            # reuse it for a completely different conversation after a restart.
-            # For an offline queued delivery, never inherit URL/identity from
-            # whichever endpoint currently happens to have that numeric tabId.
-            # The queued target must be anchored to evidence that is already
-            # known to belong to THIS binding (runtime pin snapshot or the
-            # source Run's page for its own source binding).
-            pin_state = self.endpoints.pin_state(str(binding.get("bindingId") or ""))
-            safe_url = ""
-            if isinstance(pin_state, dict) and int(pin_state.get("tabId") or -1) == target_tab:
-                pin_chat = str(pin_state.get("chatType") or "")
-                pin_conv = str(pin_state.get("conversationId") or "")
-                if pin_chat == str(binding.get("chatType") or "") and pin_conv == str(binding.get("conversationId") or ""):
-                    safe_url = str(pin_state.get("url") or "")
-
-            if not safe_url and str(binding.get("bindingId") or "") == str(ctx.get("bindingId") or ""):
-                source_page = str(ctx.get("page") or "")
-                source_identity = infer_from_page(source_page)
-                if (
-                    str(source_identity.get("chatType") or "") == str(binding.get("chatType") or "")
-                    and str(source_identity.get("conversationId") or "") == str(binding.get("conversationId") or "")
-                ):
-                    safe_url = source_page
-
-            if not safe_url:
+                raise ProfileAuthorizationError(
+                    "ENDPOINT_OFFLINE", "Target endpoint is offline",
+                    {**base, **selection})
+            endpoint = selection.get("endpoint")
+            # A queued browser delivery must already have a durable endpointId.
+            # No historical tabId/URL is promoted to identity.  Without a live
+            # session-owned endpoint the action waits before Prepare instead of
+            # materialising a manifest for an unknown target.
+            if not isinstance(endpoint, dict) or not str(endpoint.get("endpointId") or ""):
                 raise ProfileAuthorizationError(
                     "WAITING_FOR_ENDPOINT",
-                    "Target endpoint is offline and no safe URL is available for the queued tab",
-                    {"binding": binding, **selection},
-                )
-
-            endpoint = {
-                "tabId": target_tab,
-                "chatType": binding.get("chatType"),
-                "conversationId": binding.get("conversationId"),
-                "projectId": binding.get("projectId"),
-                "url": safe_url,
-                "online": False,
-            }
+                    "No durable endpoint is selected for the queued delivery",
+                    {**base, **selection})
             return {
-                "profileContext": ctx,
-                "binding": binding,
+                **base,
                 "endpoint": endpoint,
-                "selection": selection,
                 "waiting": True,
-                # Read side: the snapshot is written by the migrated validator, so
-                # the legacy key cannot appear here. Emit side: only the canonical
-                # name crosses the authorization boundary.
                 "endpointWaitTimeoutSeconds": int(
                     delivery.get("endpointWaitTimeoutSeconds", 3600)),
             }
-        raise ProfileAuthorizationError(status, status, {"profileContext": ctx, "binding": binding, **selection})
+
+        raise ProfileAuthorizationError(status, status, {**base, **selection})

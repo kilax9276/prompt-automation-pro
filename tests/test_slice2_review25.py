@@ -46,7 +46,7 @@ class RecoveryReplayWriterContract(unittest.TestCase):
     def sent_source(self, *, token="source-token", tab_id=7, page=PAGE):
         job = self.dm.create_job(
             "run1",
-            {"papSource": {"tabId": tab_id, "url": page, "chatType": "chatgpt"},
+            {"papSource": {"tabId": tab_id, "url": page, "chatType": "chatgpt", "endpointId": f"ep-{tab_id}", "browserEpoch": "epoch-1", "conversationId": "fixture"},
              "page": page, "chatType": "chatgpt", "chatLabel": "Chat"},
             {"steps": []}, {"steps": {}}, "message", "open", 8 * 1024 * 1024, 120)
         self.dm.update_from_client("run1", job["jobId"], {
@@ -224,7 +224,7 @@ class TheTwoProvenNonMatchesStayLegal(RecoveryReplayWriterContract):
         source = self.sent_source()
         plain = self.dm.create_job(
             "run1",
-            {"papSource": {"tabId": 7, "url": PAGE, "chatType": "chatgpt"},
+            {"papSource": {"tabId": 7, "url": PAGE, "chatType": "chatgpt", "endpointId": f"ep-{7}", "browserEpoch": "epoch-1", "conversationId": "fixture"},
              "page": PAGE, "chatType": "chatgpt", "chatLabel": "Chat"},
             {"steps": []}, {"steps": {}}, "plain", "open", 8 * 1024 * 1024, 120)
         stored_plain = self.stored(plain)

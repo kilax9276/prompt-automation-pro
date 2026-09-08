@@ -276,21 +276,58 @@ class ConsoleServer:
                 changed.append(self.delivery.save_job(job))
         return changed
 
-    def _mark_profile_delivery_ready(self, job: dict[str, Any], tab_id: int, page: str) -> dict[str, Any]:
+    def _profile_delivery_target_matches(
+        self, job: dict[str, Any], endpoint: dict[str, Any]
+    ) -> bool:
+        target = job.get("target") if isinstance(job.get("target"), dict) else {}
+        return str(EndpointRegistry.evaluate(target, endpoint).get("verdict") or "") == "ELIGIBLE"
+
+    def _profile_delivery_selection_matches(self, job: dict[str, Any]) -> bool:
+        pd = job.get("profileDelivery") if isinstance(job.get("profileDelivery"), dict) else None
+        if not pd:
+            return True
+        session_id = str(pd.get("deliverySessionId") or "")
+        binding_id = str(pd.get("bindingId") or "")
+        if not session_id or not binding_id:
+            return True
+        try:
+            relation = self.sessions.selection(session_id, binding_id)
+        except ProfileError:
+            return False
+        if relation is None:
+            # Automatic exactly-one selection is not written into the session.
+            # The immutable job target is therefore the authority for this
+            # already-prepared attempt until an explicit relation appears.
+            return True
+        target = job.get("target") if isinstance(job.get("target"), dict) else {}
+        relation_endpoint_id = str(relation.get("endpointId") or "")
+        if relation_endpoint_id == str(target.get("endpointId") or ""):
+            return True
+
+        # MAP-034 releases a session-owned endpoint only when its lifecycle is
+        # structurally over (CLOSED/EXPIRED).  The selection writer is not
+        # rewritten by automatic policy, so poll must apply the same release
+        # rule or it would reject the new endpoint that authorize_delivery just
+        # selected.  OFFLINE or identity-mismatched endpoints stay sticky.
+        relation_endpoint = next(
+            (row for row in self.endpoints.list().get("endpoints", [])
+             if str(row.get("endpointId") or "") == relation_endpoint_id),
+            None,
+        )
+        if not isinstance(relation_endpoint, dict):
+            return False
+        verdict = str(EndpointRegistry.evaluate(target, relation_endpoint).get("verdict") or "")
+        return verdict == "DEAD_ENDPOINT"
+
+    def _mark_profile_delivery_ready(
+        self, job: dict[str, Any], endpoint: dict[str, Any]
+    ) -> dict[str, Any]:
         pd = job.get("profileDelivery") if isinstance(job.get("profileDelivery"), dict) else None
         if not pd:
             return job
-        binding_id = str(pd.get("bindingId") or "")
-        pin = self.endpoints.pin_state(binding_id) if binding_id else None
-        if pin:
-            if pin.get("stale") or int(pin.get("tabId") or -1) != int(tab_id):
-                return job
-        target = job.get("target") if isinstance(job.get("target"), dict) else {}
-        if int(target.get("tabId") or -1) != int(tab_id):
+        if not self._profile_delivery_target_matches(job, endpoint):
             return job
-        target_url = str(target.get("url") or "").split("#", 1)[0]
-        page_url = str(page or "").split("#", 1)[0]
-        if target_url and page_url and target_url != page_url:
+        if not self._profile_delivery_selection_matches(job):
             return job
         if str(pd.get("state") or "") == "WAITING_FOR_ENDPOINT":
             pd["state"] = "READY"
@@ -299,17 +336,15 @@ class ConsoleServer:
             return self.delivery.save_job(job)
         return job
 
-    def _profile_job_poll_allowed(self, job: dict[str, Any], tab_id: int) -> bool:
+    def _profile_job_poll_allowed(
+        self, job: dict[str, Any], endpoint: dict[str, Any]
+    ) -> bool:
         pd = job.get("profileDelivery") if isinstance(job.get("profileDelivery"), dict) else None
-        if not pd:
-            return True
-        if str(pd.get("state") or "") == "ENDPOINT_WAIT_TIMEOUT":
+        if pd and str(pd.get("state") or "") == "ENDPOINT_WAIT_TIMEOUT":
             return False
-        binding_id = str(pd.get("bindingId") or "")
-        pin = self.endpoints.pin_state(binding_id) if binding_id else None
-        if pin and (pin.get("stale") or int(pin.get("tabId") or -1) != int(tab_id)):
+        if not self._profile_delivery_target_matches(job, endpoint):
             return False
-        return True
+        return self._profile_delivery_selection_matches(job)
 
     async def on_startup(self, app: web.Application) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -634,9 +669,13 @@ class ConsoleServer:
             result = dict(self.executor.load_result(run_id))
             endpoint = authorization["endpoint"]
             source = dict(result.get("papSource") or {}) if isinstance(result.get("papSource"), dict) else {}
+            source["endpointId"] = str(endpoint.get("endpointId") or "")
+            source["browserEpoch"] = str(endpoint.get("browserEpoch") or "")
             source["tabId"] = int(endpoint["tabId"])
             source["url"] = str(endpoint.get("url") or result.get("page") or "")
             source["chatType"] = str(endpoint.get("chatType") or result.get("chatType") or "unknown")
+            source["conversationId"] = str(endpoint.get("conversationId") or "")
+            source["projectId"] = endpoint.get("projectId")
             result["papSource"] = source
             result["page"] = source["url"] or result.get("page")
             plan = self.executor.ensure_plan(run_id)
@@ -652,11 +691,17 @@ class ConsoleServer:
                 "smart_zip",
                 int(max_mib * 1024 * 1024),
                 stall_seconds,
+                delivery_session_id=authorization.get("deliverySessionId"),
+                side_effect_key=(
+                    f"chat.send:{run_id}:"
+                    f"{authorization['binding'].get('bindingId') or 'source'}"
+                ),
             )
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             job["profileDelivery"] = {
                 "bindingId": authorization["binding"].get("bindingId"),
                 "profileId": authorization["profileContext"].get("profileId"),
+                "deliverySessionId": authorization.get("deliverySessionId"),
                 "state": "WAITING_FOR_ENDPOINT" if authorization.get("waiting") else "READY",
                 "waitStartedAt": now if authorization.get("waiting") else None,
                 "timeoutSec": int(authorization.get("endpointWaitTimeoutSeconds") or 0) if authorization.get("waiting") else None,
@@ -676,7 +721,17 @@ class ConsoleServer:
         run_id = request.match_info["run_id"]
         job_id = request.match_info["job_id"]
         try:
-            self.profile_context.authorize_delivery(run_id)
+            authorization = self.profile_context.authorize_delivery(run_id)
+            current_job = self.delivery.get_job(run_id, job_id)
+            target = current_job.get("target") if isinstance(current_job.get("target"), dict) else {}
+            prepared_endpoint_id = str(target.get("endpointId") or "")
+            authorized_endpoint_id = str(authorization["endpoint"].get("endpointId") or "")
+            if not prepared_endpoint_id or prepared_endpoint_id != authorized_endpoint_id:
+                raise ProfileAuthorizationError(
+                    "DELIVERY_TARGET_CHANGED",
+                    "Prepared delivery endpoint no longer matches the authorized endpoint; prepare delivery again",
+                    {"preparedTarget": target, "authorizedEndpoint": authorization["endpoint"]},
+                )
             job = self.delivery.retry_failed(run_id, job_id)
             await self.publish({"type": "delivery:update", "runId": run_id, "job": job})
             return web.json_response({"ok": True, "job": job})
@@ -693,10 +748,12 @@ class ConsoleServer:
             authorization = self.profile_context.authorize_delivery(run_id)
             current_job = self.delivery.get_job(run_id, job_id)
             target = current_job.get("target") if isinstance(current_job.get("target"), dict) else {}
-            if int(target.get("tabId") or -1) != int(authorization["endpoint"]["tabId"]):
+            prepared_endpoint_id = str(target.get("endpointId") or "")
+            authorized_endpoint_id = str(authorization["endpoint"].get("endpointId") or "")
+            if not prepared_endpoint_id or prepared_endpoint_id != authorized_endpoint_id:
                 raise ProfileAuthorizationError(
                     "DELIVERY_TARGET_CHANGED",
-                    "Prepared delivery target no longer matches the authorized endpoint; prepare delivery again",
+                    "Prepared delivery endpoint no longer matches the authorized endpoint; prepare delivery again",
                     {"preparedTarget": target, "authorizedEndpoint": authorization["endpoint"]},
                 )
             job = self.delivery.request_send(run_id, job_id)
@@ -732,11 +789,16 @@ class ConsoleServer:
             )
             source_run_id = str(source_job.get("runId") or source_run_id)
             authorization = self.profile_context.authorize_delivery(source_run_id)
-            if int(authorization["endpoint"]["tabId"]) != tab_id:
+            source_target = source_job.get("target") if isinstance(source_job.get("target"), dict) else {}
+            source_endpoint_id = str(source_target.get("endpointId") or "")
+            authorized_endpoint_id = str(authorization["endpoint"].get("endpointId") or "")
+            if (not source_endpoint_id or source_endpoint_id != authorized_endpoint_id
+                    or int(authorization["endpoint"]["tabId"]) != tab_id):
                 raise ProfileAuthorizationError(
                     "DELIVERY_TARGET_CHANGED",
-                    "Recovery tab is no longer the authorized endpoint",
-                    {"requestedTabId": tab_id, "authorizedEndpoint": authorization["endpoint"]},
+                    "Recovery target is no longer the authorized endpoint",
+                    {"requestedTabId": tab_id, "sourceTarget": source_target,
+                     "authorizedEndpoint": authorization["endpoint"]},
                 )
 
             job = self.delivery.create_recovery_replay(
@@ -1005,20 +1067,21 @@ class ConsoleServer:
         # refusal is the answer, not something to hide behind an empty 200 —
         # that combination is what let a broken call look healthy.
         try:
-            self.endpoints.observe(tab_id, page, endpoint_id=endpoint_id,
-                                   title=title, browser_epoch=browser_epoch,
-                                   chat_type=chat_type, conversation_id=conversation_id,
-                                   project_id=project_id)
+            observed_endpoint = self.endpoints.observe(
+                tab_id, page, endpoint_id=endpoint_id,
+                title=title, browser_epoch=browser_epoch,
+                chat_type=chat_type, conversation_id=conversation_id,
+                project_id=project_id)
         except EndpointError as exc:
             return web.json_response({"ok": False, "code": "ENDPOINT_REJECTED",
                                       "error": str(exc)}, status=409)
 
         self._clear_version_mismatch(browser_epoch)
         self._expire_endpoint_waits()
-        job = self.delivery.poll_for_tab(tab_id, page)
+        job = self.delivery.poll_for_tab(tab_id, page, endpoint_id)
         if job is not None:
-            job = self._mark_profile_delivery_ready(job, tab_id, page)
-            if not self._profile_job_poll_allowed(job, tab_id):
+            job = self._mark_profile_delivery_ready(job, observed_endpoint)
+            if not self._profile_job_poll_allowed(job, observed_endpoint):
                 job = None
         return web.json_response({"ok": True, "job": job})
 
@@ -1040,6 +1103,7 @@ class ConsoleServer:
             # addressed to another simply by naming it.
             body = dict(body)
             body["tabId"] = int(ctx["endpoint"].get("tabId"))
+            body["endpointId"] = str(ctx.get("endpointId") or "")
             job = self.delivery.update_from_client(run_id, job_id, body)
             await self.publish({"type": "delivery:update", "runId": run_id, "job": job})
             return web.json_response({"ok": True, "job": job})
@@ -1070,7 +1134,8 @@ class ConsoleServer:
             body = self.delivery.attachment_chunk(
                 run_id, job_id, attachment_id, offset, limit,
                 tab_id=int(ctx["endpoint"].get("tabId")),
-                lease_token=str(query.get("leaseToken") or "").strip())
+                lease_token=str(query.get("leaseToken") or "").strip(),
+                endpoint_id=str(ctx.get("endpointId") or ""))
             return web.json_response(body)
         except DeliveryError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=404)

@@ -2,7 +2,7 @@
 
 Статус: **implementation map only**. Сервер/стенд не изменялись, сборка/активация не выполнялись. Основание: `Console 4.4.0 r7 + Extension 2.11.6 + receiver 2.10.0; git 830ab8c6453fa58ab1fd1339e210a41857e16df6`.
 
-- **Редакция дизайна:** `1b3d806b53d92399dea48f8b9546ba2ddc6fba83a360bb9a746ea9735fd875e1` / 2667 строк
+- **Редакция дизайна:** `0fcf91e2b7368a5badeee3563850544929bf6b62854a7b1913909787e75adfaa` / 2681 строк
 - **Историческая точка 4.4.0:** `830ab8c6453fa58ab1fd1339e210a41857e16df6` — не заменяется никогда. Каталоги `console_releases/4.3.5`, `console_releases/4.4.0` и корневой `server.py` заморожены: срез 1 не правил их на месте, а создал свои каталоги релизов. Поэтому строки закрытых срезов не устаревают — байты, которые они описывают, не изменятся.
 - **Статусы якорей:** строка закрытого среза помечена `HISTORICAL` и по байтам не сверяется; строка будущего среза помечена `ACTIVE` и её якоря выпущены на рабочем основании.
 - **Рабочее основание:** три поддерева git, перечисленные ниже. Коммит здесь не называется намеренно: поддерево живёт дольше любого коммита, а объявленный номер коммита устаревает при первой же несвязанной правке и начинает описывать не то дерево, которое проверяется. Идентичность даёт git, а не собственный дайджест: он уже строит Merkle-дерево по всем байтам. Именно поддеревья, а не `HEAD` и не корневое дерево — несвязанный коммит вроде правки README сдвигает корень, не сдвигая ни одного якоря, и значение, требующее ручной правки при каждом таком коммите, перестаёт описывать дерево.
@@ -1531,14 +1531,14 @@ Server endpoint ownership/registry, Extension endpointId/epoch/alarms и canonic
 | `ACC-S3B-002` | Artifact produced by same Run выигрывает перед attention/fallback. | PLANNED |
 | `ACC-S3B-003` | Chat request и operator action идут параллельно в одном timeout; first valid result atomically pins manifest. | PLANNED |
 | `ACC-S3B-004` | После timeout fallback-latest помечен substituted; если artifact отсутствует → FILE_ACQUIRE_FAILED; requested destination materialized atomically. | PLANNED |
-| `ACC-S4-001` | Old Run action переносится под current session только при полном пятичастном match. | PLANNED |
-| `ACC-S4-002` | Mismatch требует operator resolution; run.sessionId provenance не переписывается, action.deliverySessionId отдельный. | PLANNED |
-| `ACC-S4-003` | Exactly one ELIGIBLE endpoint выбирается; multiple eligible without session ownership → ENDPOINT_AMBIGUOUS. | PLANNED |
-| `ACC-S4-004` | Selected offline endpoint stays bound and waits; transient offline не вызывает silent reselection. | PLANNED |
-| `ACC-S4-005` | Identity/project/chatType mismatch excludes endpoint only for that target; URL не участвует в identity. | PLANNED |
-| `ACC-S4-006` | Delivery manifest immutable and records exact sent attachment names/bytes/artifact ids. | PLANNED |
-| `ACC-S4-007` | Download “files as sent” reconstructs strictly from immutable delivery manifest. | PLANNED |
-| `ACC-S4-008` | Supersede affects previous attempt same logical delivery, not all jobs for same conversation. | PLANNED |
+| `ACC-S4-001` | Old Run action переносится под current session только при полном пятичастном match. | PASS |
+| `ACC-S4-002` | Mismatch требует operator resolution; run.sessionId provenance не переписывается, action.deliverySessionId отдельный. | PASS |
+| `ACC-S4-003` | Exactly one ELIGIBLE endpoint выбирается; multiple eligible without session ownership → ENDPOINT_AMBIGUOUS. | PASS |
+| `ACC-S4-004` | Selected offline endpoint stays bound and waits; transient offline не вызывает silent reselection. | PASS |
+| `ACC-S4-005` | Identity/project/chatType mismatch excludes endpoint only for that target; URL не участвует в identity. | PASS |
+| `ACC-S4-006` | Delivery manifest immutable and records exact sent attachment names/bytes/artifact ids. | PASS |
+| `ACC-S4-007` | Download “files as sent” reconstructs strictly from immutable delivery manifest. | PASS |
+| `ACC-S4-008` | Supersede affects previous attempt same logical delivery, not all jobs for same conversation. | PASS |
 | `ACC-S5-001` | Intake gate CLOSED rejects result before allocating runId/directory. | PLANNED |
 | `ACC-S5-002` | Generic command schema validates per-profile definitions and mirror input/output file settings. | PLANNED |
 | `ACC-S5-003` | Journal SENT recovers as sent without duplicate. | PLANNED |

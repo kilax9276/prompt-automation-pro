@@ -1,4 +1,4 @@
-# PAP2 4.5.0 — передача работы: срез 2, серверный блок 2+5
+# PAP2 4.5.0 — передача работы: срез 2, шаг 4 / S4 delivery semantics
 
 Документ самодостаточен. Новый чат может продолжить работу, не читая исходную
 переписку и не получая отдельных файлов: весь новый код среза 2 приведён здесь
@@ -16,10 +16,11 @@
 Идёт разработка релиза **4.5.0**, разбитого на семь срезов. Каждый срез
 самостоятельно проверяем и самостоятельно откатываем.
 
-**Непосредственная цель сейчас** — довести до внутренней целостности
-серверный блок среза 2 («блок 2+5»): модель endpoint, владение управляющим
-агентом, барьеры протокола на браузерных маршрутах, режимы выката
-DRAIN/BARRIER с защёлкой неизвестного исхода.
+**Непосредственная цель сейчас** — независимо проверить шаг 4: окончательную
+семантику доставки среза 4 (`MAP-018`, `MAP-034`, `MAP-035`, `MAP-036`) поверх
+опубликованного шага 3. Это re-authorization через совместимую ProfileSession,
+endpoint selection policy, immutable delivery manifest и logical-delivery
+supersession. Commit/rollout этого шага до независимого CLEAN запрещены.
 
 Срез 2 — первая по-настоящему атомарная граница: сервер и расширение
 выкатываются только вместе и откатываются только вместе.
@@ -62,34 +63,47 @@ aa6aa61  Add 4.5.0 design document
 срезе 1. Это закрытие по коду, не приёмка всего среза: `ACC-S2-036` остаётся
 `PLANNED`, `ACC-LIVE-001/002/003` — `NOT RUN`.
 
-### Срез 2, шаг 3 — `MAP-028`, текущая незакоммиченная работа
+### Срез 2, шаг 3 — `MAP-028`, development complete, коммит `b7d39e3`
 
-Добавлен серверный `selectEndpoint(sessionId,bindingId,endpointId)` как
-отношение `ProfileSession × ChatBinding`: route повторно проверяет живую
-сессию, включённые profile/binding и текущий ONLINE endpoint с совпадающей
-identity, после чего пишет только `ProfileSession.endpointSelections`.
-Endpoint registry и ChatBinding не получают policy-полей. Новый набор
-`tests/test_slice2_select_endpoint.py`: на принятом Review 27 — `9 failed`
-(route отсутствует), после реализации — `9 passed`. Независимый review 1 не нашёл продуктового дефекта,
-но нашёл пробел доказательства `MAP-088`: legacy-session без поля
-`endpointSelections` не была закреплена regression-тестом. Принят неизменённый
-аудит `tests/test_slice2_map028_legacy_session.py` (SHA-256
-`ca915af9eaa057d841ab37d109c193b8abc145851300c81df4524976c6d1f5d4`):
-`3 passed` на тех же продуктовых байтах. Продуктовый код после review 1 не менялся.
-Полный набор сейчас:
+Независимый review 2 завершён CLEAN. Development-коммит
+`b7d39e350cf47f7b3ef6d6a34f63990f839257db` создан поверх `d943c11` на
+ветке `s2-block25` и опубликован в `origin/s2-block25`; `main` не сдвинут.
+`selectEndpoint(sessionId,bindingId,endpointId)` хранит только relation
+`ProfileSession × ChatBinding`, legacy pin/approved state не мигрирует.
+`ACC-S2-007=PASS`, `ACC-S2-008` остаётся `PLANNED`. Выката нет.
 
-```
-247 passed, 64 subtests
-verify_inventory 177/0
-verify_overlaps  10/0
-verify_map       214/0 VERIFIED_CLEAN
-```
+### Срез 2, шаг 4 — S4 delivery semantics, текущий review-кандидат
 
-Scope зафиксирован картой: `authorize_delivery` и `select_for_binding` не
-переписываются в шаге 3 — это `MAP-018`/`MAP-034` среза 4. Поэтому
-`ACC-S2-007=PASS`, а `ACC-S2-008` остаётся `PLANNED`.
+Реализованы все четыре обязанности S4:
 
-Содержание блока:
+- `MAP-018`: `authorize_delivery` переносит действие старого Run под current
+  ProfileSession только при доказанном совпадении profileId, snapshotDigest,
+  bindingId, role и identity; immutable `run.sessionId` не переписывается;
+- `MAP-034`: endpoint policy разделена на pure `evaluate` и `select`; явный
+  session-owned endpoint sticky при OFFLINE/identity mismatch и освобождается
+  только при CLOSED/EXPIRED; ambiguity явная;
+- `MAP-035`: job получает `endpointId`, `deliverySessionId`,
+  `logicalDeliveryId`, `sideEffectKey` и immutable manifest. Manifest фиксирует
+  deliveryId, target/message и для outgoing attachments — ordinal, artifact
+  provenance, outgoingFilename, size, sha256; bundle хранит ordered
+  `sourceArtifactIds`;
+- `MAP-036`: supersede касается только предыдущих незавершённых попыток той же
+  logical delivery и сохраняет S2 lease/single-flight interlock. Независимые
+  доставки в один conversation больше не уничтожают друг друга.
+
+Дополнительный негативный проход уже нашёл и закрыл два интеграционных дефекта:
+после CLOSED/EXPIRED старая explicit relation больше не блокирует endpoint,
+который тот же `select()` только что выбрал автоматически; retry существующего
+job отказывает до мутации, если live authorization уже указывает на другой
+endpoint. Также закреплены нулевые attachments и immutable files-as-sent.
+
+Текущий regression-файл `tests/test_slice4_delivery_semantics.py` содержит
+23 теста. На точных байтах MAP-028 Review 2 он должен быть RED; на кандидате —
+23 PASS. Полный набор на текущем дереве: `274 passed, 64 subtests`;
+verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `214/0 VERIFIED_CLEAN`.
+`ACC-S4-001…008=PASS`. Commit, push нового S4 commit и rollout не выполнялись.
+
+Содержание уже закрытого блока 2+5:
 
 - реестр endpoint переведён на `endpointId` как ключ, добавлены
   `browserEpoch` и состояния `ONLINE/OFFLINE/CLOSED/EXPIRED`;
@@ -108,23 +122,24 @@ Scope зафиксирован картой: `authorize_delivery` и `select_for
 
 ```
 console_releases/4.5.0-s2/endpoint_registry.py
-  f5b7485861942b6cf9cffa08e1f870b3efcb49d794d448b1ded6b4bfac2d44b4
+  99b085d3ff28deced65ce207167ecb4e47e40dd864acd0bd57d3899a8f484ed2
 console_releases/4.5.0-s2/console_server.py
-  bf1de07250b56ee88da1225bc84b0fb8bed97d4f5c6aaa521c4fb73dcea580b6
+  9406472c9a2f5eaafe641628fbd68eec2f4feff5ac1f4918d37667168da97b74
 console_releases/4.5.0-s2/delivery_manager.py
-  6efae84696b9b2ecab8462287e8a1cc6d309afae7b30bcdcd1c59b031030155b
+  0b56eb9687feb52ccb4022bddabc16d3910db27e1d04ae93c0aeec700e56ce42
 console_releases/4.5.0-s2/profile_store.py
-  7423a2aaed03043c848193648924ca63461f391834241316742923d34c77fa6c
+  698146ef9d810f483a059387d535c02658c55d1272209141605159ff45cd5e2f
 console_releases/4.5.0-s2/run_profile_context.py
-  eea94b3393710af128964d11441dc985c78244d9ace0631d768fb9829bfe8bb6
+  e94031ed9a0e55569347064d8e54db99b91eb2341100d7f37cacc5f684ba3175
 console_releases/4.5.0-s2/static/app.js
   d36a8912333f3258ef125637b87807a82b2bdb252521861bb96a46bff59ff922
 tests/test_slice1.py         6bb3baef1b5d28dfb3d1c5f3bdf82f96027b5d94aa9fe5ebf839fbc0d0d44d99
 tests/test_slice2_step1.py   8dece3d4a62074e2fa128cbb426fb96f83ade6ea52821af0bfd839b21182513e
 tests/test_slice2_endpoint.py e36bab185c67c369b5ddc56f1fc77e933c0c4b69cba459a92f5727c7fdc70bc1
-tests/test_slice2_rollout.py fd85175041bae22f6d394b3c30adf7cb07e0c663bf96fce409bdeae3215ff6e4
-tests/test_slice2_review24.py 840c782169842ae4eeaee64ed7f7378ecad6545b52ddccafaa5d3f000ae949b4
-tests/test_slice2_review25.py 3708e86a23baf3b5789a82080f5394c9485120f9c388abc3f200317f7048db24
+tests/test_slice2_rollout.py 99ba66473a5b8beda54c592d2721ad81e37ade0c81f070d3287e79bea905e6d9
+tests/test_slice2_review24.py 29f141a56a9d27257ed3b5e0b1ce33e5866290961acb51c7affc97572620b9f1
+tests/test_slice2_review25.py b1490c70fcc799a3fcb314025f000653de02c5a6408b8ebdb6826a1c809bfd39
+tests/test_slice4_delivery_semantics.py a207cc00661e748966ee0876de87a0e2a735609e8f6650106a4f241a04129042
 RUN_TESTS.sh                 7a41c46b4c28250cf866b25a100bf6d2d9535a6fcba3b0fb2f44858b4c9a3292
 ```
 
@@ -146,10 +161,10 @@ extension  extension_releases/2.11.6     65b0db4ed31d36f68bb3f6b832797d4e524edeb
 ### Карта реализации и дизайн
 
 ```
-PAP2_4.5.0_IMPLEMENTATION_MAP.md   87 строк MAP: 18 HISTORICAL + 68 ACTIVE
+PAP2_4.5.0_IMPLEMENTATION_MAP.md   88 строк MAP
                                    127 acceptance
-docs/PAP2_4.5.0_DESIGN.md          2645 строк, журнал решений включён
-цепочка проверки                   verify_inventory 177/0, verify_overlaps 10/0, verify_map 212/0
+docs/PAP2_4.5.0_DESIGN.md          2681 строк, журнал решений включён
+цепочка проверки                   verify_inventory 177/0, verify_overlaps 10/0, verify_map 214/0
 ```
 
 На момент тринадцатого раунда здесь стояло `82 / 121 / 2487` и
@@ -2295,7 +2310,7 @@ extension_releases/2.11.6/      замороженный байтовый baseli
 extension_releases/2.11.7/      релиз с копирайтом, база для среза 2
 packaging/                      установщик релиза и манифесты
 
-tests/                          247 тестов, включая MAP-028 legacy regression
+tests/                          270 тестов, включая S4 delivery regressions
 diff/                           три патча относительно коммита 8fc773c
 docs/PAP2_4.5.0_DESIGN.md       дизайн, 2667 строк, журнал решений
 PAP2_4.5.0_IMPLEMENTATION_MAP.md   карта точек врезки
@@ -2307,7 +2322,7 @@ LICENSE, README.md, CHANGELOG.md, REPO_README.md
 Проверено на распакованном архиве:
 
 ```
-bash RUN_TESTS.sh              247 passed, 64 subtests passed
+bash RUN_TESTS.sh              274 passed, 64 subtests passed
 tools/verify_inventory.py      checks=177 failures=0
 tools/verify_overlaps.py       checks=10  failures=0
 tools/verify_map.py            checks=214 failures=0
@@ -2487,7 +2502,6 @@ review 14 только что принятому инварианту и неэ�
 | `ACC-MIG-019` | срез 3a, панель доставки |
 | `ACC-S2-032` | шаг 6, обратный забор в расширении |
 | `ACC-LIVE-001/002/003` | живой прогон с браузером, обязателен до закрытия среза 2 |
-| `pin_state`, `pinned_tab`, `select_for_binding` | read-side хвост, уходит с переписыванием выбора |
 | пауза профиля по расхождению версий | срез 5, общая модель паузы (`ACC-S5-024`) |
 | сводка по профилям, удаление профиля | после среза 2 |
 | `ACC-S2-036` | шаг 6/7, heartbeat-цикл в расширении 2.12.0 |
@@ -2502,25 +2516,29 @@ review 14 только что принятому инварианту и неэ�
 шаг 1   переименование timeout                    ЗАКРЫТ, коммит 8fc773c
 шаг 2+5 модель endpoint, владение, барьеры,
         DRAIN/BARRIER                             ЗАКРЫТ ПО КОДУ, коммит d943c11
-шаг 3   selectEndpoint, привязка сессии           ← ЗДЕСЬ, ожидает независимого review
-шаг 4   семантика доставки и слива
+шаг 3   selectEndpoint, привязка сессии           ЗАКРЫТ, коммит b7d39e3
+шаг 4   семантика доставки и слива                ← ЗДЕСЬ, независимый review
 шаг 6   эпохи и управляющий агент в расширении
 шаг 7   мост ENDPOINT и обратный забор
 шаг 8   интеграция выката и миграции
 ```
 
-**Немедленно:** независимо проверить review 2 текущей реализации шага 3
-(`MAP-028`), включая добавленную legacy-session regression из независимого review 1.
-Если найдутся дефекты — воспроизвести их на коде до починки, исправить в этом
-же незакоммиченном наборе и повторить полный контур.
+**Немедленно:** независимо проверить текущий S4 Review 2 кандидат (`MAP-018`,
+`MAP-034`, `MAP-035`, `MAP-036`) на точных байтах пакета. Review 1 получил
+CHANGES REQUESTED не по продукту, а по доказательству: при адаптации старых
+тестов к logical-delivery supersede были утрачены три fail-closed оси Review 27
+и одна ось Review 26. В Review 2 они восстановлены через writer-produced
+same-logical supersede; S4 production bytes не менялись. Причинный RED-before
+для самого S4 по-прежнему выполняется тем же `test_slice4_delivery_semantics.py`
+на MAP-028 Review 2.
 
-**После CLEAN:** зафиксировать шаг 3 отдельным development-коммитом на ветке
-`s2-block25` поверх `d943c11`, без выката, затем опубликовать только эту ветку.
-`main` и работающий стенд pro2 остаются на срезе 1.
+**После CLEAN:** зафиксировать шаг 4 отдельным development-коммитом на ветке
+`s2-block25` поверх `b7d39e350cf47f7b3ef6d6a34f63990f839257db`, без выката, затем
+опубликовать только эту ветку. `main` и работающий стенд pro2 остаются на срезе 1.
 
-**Затем:** перейти к следующей строке утверждённого порядка. Не переносить в
-шаг 3 обязанности `MAP-018`/`MAP-034` (delivery selection policy) и
-`MAP-049`/`MAP-050` (binding/resolver schema cleanup).
+**Затем:** перейти к следующей строке утверждённого порядка. `MAP-018`/`MAP-034`
+входят в текущий шаг 4; не захватывать сюда `MAP-049`/`MAP-050`
+(binding/resolver schema cleanup) и обязанности шагов 6–8.
 
 ---
 
@@ -2544,7 +2562,7 @@ bash RUN_TESTS.sh
 cd tools && python3 verify_inventory.py && python3 verify_overlaps.py && python3 verify_map.py
 ```
 
-Ожидается `247 passed, 64 subtests passed`; verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `214/0 VERIFIED_CLEAN`.
+Ожидается `274 passed, 64 subtests passed`; verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `214/0 VERIFIED_CLEAN`.
 
 Дерево полное: тесты, проверка карты, запуск платформы, выкат и откат среза 1,
 живой smoke. Порядок команд для каждого — в `ENVIRONMENT.md`. В архиве
@@ -2553,8 +2571,8 @@ cd tools && python3 verify_inventory.py && python3 verify_overlaps.py && python3
 
 **Прими правила, они не обсуждаются:**
 
-1. Не выкатывать. Блок 2+5 уже зафиксирован в `s2-block25` как `d943c11`;
-   текущий шаг 3 не коммитить до независимого CLEAN. Стенд работает на срезе 1.
+1. Не выкатывать. Блок 2+5 и MAP-028 уже зафиксированы в `s2-block25`;
+   текущий шаг 4 не коммитить до независимого CLEAN. Стенд работает на срезе 1.
 2. Fail-closed везде. Неизвестное, повреждённое, противоречивое состояние —
    это UNKNOWN, а не отсутствие.
 3. Отказ до мутации, никогда после.
@@ -2578,16 +2596,13 @@ cd tools && python3 verify_inventory.py && python3 verify_overlaps.py && python3
 быть самодостаточным: изменённые файлы, тесты, отчёт о прогоне, диффы
 относительно основания, точные SHA.
 
-**Текущая задача:** независимый review 2 шага 3 `MAP-028`. Review 1 не нашёл
-продуктового дефекта; единственный blocker был в отсутствии regression на старую
-session без `endpointSelections`. Этот exact audit теперь добавлен как
-`tests/test_slice2_map028_legacy_session.py`; продуктовый код не менялся. Проверить, что
-`selectEndpoint` является только session-binding relation: live auth/identity
-выполняются до записи, endpoint/binding не мутируют, old pin/approved state не
-мигрирует. Не требовать от шага 3 чтения relation доставкой: `MAP-018` и
-`MAP-034` остаются будущими. При замечании сначала воспроизвести его на точных
-байтах текущего кандидата, затем исправлять. После CLEAN — отдельный
-development-коммит поверх `d943c11` на `s2-block25`, без rollout.
+**Текущая задача:** независимый review шага 4. Проверить совместимость
+ProfileSession при re-authorization, единую `evaluate/select` policy, sticky
+OFFLINE и release только CLOSED/EXPIRED, immutable target/manifest, exact
+files-as-sent и supersede по logical identity с сохранением S2 lease gate.
+Особенно искать writer-produced состояния, где отказ происходит после мутации
+или policy и poll расходятся. После CLEAN — отдельный development-коммит поверх
+`b7d39e3` на `s2-block25`, без rollout.
 
 **Формат ответа пользователю:** прямо, по делу, без похвал и лишних оговорок.
 Русский язык. Хэши изменённых файлов и результат прогона тестов в каждом
@@ -2603,8 +2618,8 @@ PAP2 — система исполнения директив из чатов И
 Срез 1 закрыт и работает на стенде. Срез 2 — первая атомарная граница, где
 сервер и расширение выкатываются только вместе. Шаг 1 закоммичен как `8fc773c`,
 блок 2+5 прошёл review 27 CLEAN и опубликован отдельной веткой как `d943c11`,
-без rollout. Текущая работа — шаг 3 `MAP-028`: серверный операторский writer
-session-binding selection, пока без интеграции delivery-resolver среза 4.
+без rollout. Шаг 3 `MAP-028` уже зафиксирован как `b7d39e3`; текущая работа —
+шаг 4 с окончательной server-side delivery selection/manifest/supersede semantics.
 
 Блок вводит идентичность endpoint вместо номера вкладки, владение
 управляющим агентом на аренде, единый барьер протокола на всех браузерных

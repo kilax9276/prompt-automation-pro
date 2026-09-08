@@ -521,71 +521,133 @@ class EndpointRegistry:
         return {"schemaVersion": 2, "onlineGraceSeconds": ONLINE_GRACE_SECONDS,
                 "endpoints": endpoints}
 
-    def endpoints_for_binding(self, binding: dict[str, Any], online_only: bool = True) -> list[dict[str, Any]]:
-        rows = []
-        for ep in self.list()["endpoints"]:
-            if str(ep.get("chatType")) != str(binding.get("chatType")):
-                continue
-            if str(ep.get("conversationId") or "") != str(binding.get("conversationId") or ""):
-                continue
-            bp = str(binding.get("projectId") or "")
-            ep_project = str(ep.get("projectId") or "")
-            if bp and ep_project and bp != ep_project:
-                continue
-            if online_only and not ep.get("online"):
-                continue
-            rows.append(ep)
-        return rows
+    @staticmethod
+    def evaluate(target: dict[str, Any], endpoint: dict[str, Any]) -> dict[str, Any]:
+        """Pure relation between one delivery target and one observed endpoint.
 
-    # pin/unpin removed in slice 2.
-    #
-    # Selection stopped being a property written onto an endpoint: it is a
-    # relation between a session and a binding, established by selectEndpoint.
-    # There is deliberately no way left to *create* a pin. pin_state and
-    # pinned_tab survive only as read-side tails for callers that have not moved
-    # yet; after the schema-2 invalidation there is physically nothing for them
-    # to read, and they disappear with the selection rewrite.
+        Observation and policy stay separate: this method never reads or writes
+        registry state.  URL/title/tabId are deliberately absent from identity;
+        only normalized chat identity and endpoint lifecycle participate.
+        """
+        state = str(endpoint.get("state") or "")
+        endpoint_id = str(endpoint.get("endpointId") or "")
+        result = {"endpointId": endpoint_id, "state": state, "verdict": None}
+        if state in TERMINAL_STATES:
+            result["verdict"] = "DEAD_ENDPOINT"
+            return result
+        if str(endpoint.get("chatType") or "") != str(target.get("chatType") or ""):
+            result["verdict"] = "CHAT_TYPE_MISMATCH"
+            return result
+        if str(endpoint.get("conversationId") or "") != str(target.get("conversationId") or ""):
+            result["verdict"] = "IDENTITY_MISMATCH"
+            return result
+        required_project = str(target.get("projectId") or "")
+        if required_project and str(endpoint.get("projectId") or "") != required_project:
+            result["verdict"] = "PROJECT_MISMATCH"
+            return result
+        if state == STATE_OFFLINE or not bool(endpoint.get("online")):
+            result["verdict"] = "OFFLINE"
+            return result
+        if state != STATE_ONLINE:
+            # A schema-2 row can only expose the four known lifecycle states.
+            # Keeping an explicit refusal here makes this helper fail closed if
+            # a future caller bypasses list() validation.
+            result["verdict"] = "ENDPOINT_STATE_INVALID"
+            return result
+        result["verdict"] = "ELIGIBLE"
+        return result
 
-    def pin_state(self, binding_id: str) -> dict[str, Any] | None:
-        value = self._load().get("pins", {}).get(str(binding_id))
-        if value is None:
-            return None
-        if isinstance(value, dict):
-            try:
-                return {**value, "tabId": int(value.get("tabId"))}
-            except Exception:
-                return None
-        try:
-            return {"tabId": int(value), "stale": False}
-        except Exception:
-            return None
+    @classmethod
+    def select(cls, target: dict[str, Any], candidates: list[dict[str, Any]],
+               selected_endpoint_id: str | None = None) -> dict[str, Any]:
+        """Single policy point for endpoint choice.
 
-    def pinned_tab(self, binding_id: str) -> int | None:
-        pin = self.pin_state(binding_id)
-        return int(pin["tabId"]) if pin else None
+        A session-owned endpoint wins while it is live.  If it is merely
+        OFFLINE, selection is sticky and no other live endpoint is acquired.
+        Only a structurally ended relation (CLOSED/EXPIRED) is released for
+        a fresh deterministic choice.
+        """
+        rows = [dict(x) for x in candidates if isinstance(x, dict)]
+        evaluations = [cls.evaluate(target, row) for row in rows]
+        selected_id = str(selected_endpoint_id or "").strip()
 
-    def select_for_binding(self, binding: dict[str, Any]) -> dict[str, Any]:
-        if str(binding.get("endpointPolicy") or "conversation") == "approved_endpoint":
-            approved = str(binding.get("approvedEndpointId") or "")
-            if not approved:
-                return {"status": "ENDPOINT_NOT_APPROVED", "endpoint": None, "candidates": []}
-            candidates = [x for x in self.endpoints_for_binding(binding, online_only=True) if str(x.get("endpointId") or "") == approved]
-            if not candidates:
-                return {"status": "WAITING_FOR_ENDPOINT", "endpoint": None, "candidates": []}
-            return {"status": "READY", "endpoint": candidates[0], "candidates": candidates}
+        if selected_id:
+            selected_row = next((row for row in rows if str(row.get("endpointId") or "") == selected_id), None)
+            selected_eval = next((ev for ev in evaluations if str(ev.get("endpointId") or "") == selected_id), None)
+            if selected_row is None or selected_eval is None:
+                return {
+                    "status": "ENDPOINT_SELECTION_UNPROVABLE",
+                    "endpoint": None,
+                    "candidates": rows,
+                    "evaluations": evaluations,
+                    "selectedEndpointId": selected_id,
+                }
+            verdict = str(selected_eval.get("verdict") or "")
+            if verdict == "ELIGIBLE":
+                return {
+                    "status": "READY", "endpoint": selected_row,
+                    "candidates": rows, "evaluations": evaluations,
+                    "selectedEndpointId": selected_id, "sessionOwned": True,
+                }
+            if verdict == "OFFLINE":
+                return {
+                    "status": "WAITING_FOR_ENDPOINT", "endpoint": selected_row,
+                    "candidates": rows, "evaluations": evaluations,
+                    "selectedEndpointId": selected_id, "sessionOwned": True,
+                    "blockedBy": verdict,
+                }
+            if verdict in {"CHAT_TYPE_MISMATCH", "IDENTITY_MISMATCH", "PROJECT_MISMATCH"}:
+                # Only CLOSED/EXPIRED ends a session binding.  A tab that has
+                # navigated away still owns the relation, but it is not a safe
+                # target for a queued manifest.  Keep the relation sticky while
+                # returning no endpoint to materialise.
+                return {
+                    "status": "WAITING_FOR_ENDPOINT", "endpoint": None,
+                    "blockedEndpoint": selected_row,
+                    "candidates": rows, "evaluations": evaluations,
+                    "selectedEndpointId": selected_id, "sessionOwned": True,
+                    "blockedBy": verdict,
+                }
+            if verdict == "ENDPOINT_STATE_INVALID":
+                return {
+                    "status": "ENDPOINT_SELECTION_UNPROVABLE", "endpoint": None,
+                    "candidates": rows, "evaluations": evaluations,
+                    "selectedEndpointId": selected_id,
+                }
+            # DEAD_ENDPOINT is the one lifecycle result that releases this
+            # relation for a fresh selection.  The session store is not
+            # mutated here; an explicit operator selection remains a writer
+            # operation, while policy may functionally move past a dead row.
 
-        candidates = self.endpoints_for_binding(binding, online_only=True)
-        pin = self.pin_state(str(binding.get("bindingId") or ""))
-        if pin is not None:
-            pinned = int(pin["tabId"])
-            if pin.get("stale"):
-                return {"status": "WAITING_FOR_ENDPOINT", "endpoint": None, "candidates": candidates, "pinned": True, "pinnedTabId": pinned, "pinStale": True, "pinState": pin}
-            chosen = next((x for x in candidates if int(x.get("tabId") or -1) == pinned), None)
-            if chosen is not None:
-                return {"status": "READY", "endpoint": chosen, "candidates": candidates, "pinned": True}
-            return {"status": "WAITING_FOR_ENDPOINT", "endpoint": None, "candidates": candidates, "pinned": True, "pinnedTabId": pinned}
-        if not candidates:
-            return {"status": "WAITING_FOR_ENDPOINT", "endpoint": None, "candidates": []}
-        if len(candidates) > 1:
-            return {"status": "ENDPOINT_AMBIGUOUS", "endpoint": None, "candidates": candidates}
-        return {"status": "READY", "endpoint": candidates[0], "candidates": candidates}
+        eligible = [
+            row for row, ev in zip(rows, evaluations)
+            if str(ev.get("verdict") or "") == "ELIGIBLE"
+        ]
+        if len(eligible) == 1:
+            return {
+                "status": "READY", "endpoint": eligible[0],
+                "candidates": rows, "evaluations": evaluations,
+                "selectedEndpointId": selected_id or None,
+                "sessionOwned": False,
+            }
+        if len(eligible) > 1:
+            return {
+                "status": "ENDPOINT_AMBIGUOUS", "endpoint": None,
+                "candidates": eligible, "evaluations": evaluations,
+                "selectedEndpointId": selected_id or None,
+            }
+        return {
+            "status": "WAITING_FOR_ENDPOINT", "endpoint": None,
+            "candidates": rows, "evaluations": evaluations,
+            "selectedEndpointId": selected_id or None,
+        }
+
+    def select_for_binding(self, binding: dict[str, Any],
+                           selected_endpoint_id: str | None = None) -> dict[str, Any]:
+        """Evaluate all observed endpoints, then apply the one selection policy.
+
+        Legacy endpointPolicy/approvedEndpointId and global pins are ignored.
+        Their schema removal is MAP-049/MAP-050; this reader stops granting them
+        authority now, which is the MAP-034 boundary.
+        """
+        return self.select(binding, self.list()["endpoints"], selected_endpoint_id)

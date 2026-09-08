@@ -54,7 +54,7 @@ class DeferredRetirement(unittest.TestCase):
     def new_job(self, *, tab=7):
         return self.dm.create_job(
             "run1",
-            {"papSource": {"tabId": tab, "url": PAGE, "chatType": "chatgpt"},
+            {"papSource": {"tabId": tab, "url": PAGE, "chatType": "chatgpt", "endpointId": f"ep-{tab}", "browserEpoch": "epoch-1", "conversationId": "fixture"},
              "page": PAGE, "chatType": "chatgpt", "chatLabel": "Chat"},
             {"steps": []}, {"steps": {}}, "message", "open", 8 * 1024 * 1024, 120)
 

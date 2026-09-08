@@ -74,7 +74,7 @@ class WriterFixture(unittest.TestCase):
         dm = manager or self.dm
         return dm.create_job(
             run_id,
-            {"papSource": {"tabId": tab, "url": PAGE, "chatType": "chatgpt"},
+            {"papSource": {"tabId": tab, "url": PAGE, "chatType": "chatgpt", "endpointId": f"ep-{tab}", "browserEpoch": "epoch-1", "conversationId": "fixture"},
              "page": PAGE, "chatType": "chatgpt", "chatLabel": "Chat"},
             {"steps": []},
             {"steps": {}},

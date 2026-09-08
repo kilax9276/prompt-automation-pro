@@ -41,11 +41,11 @@ def iso(dt):
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def make_job(manager, *, tab=7, run_id="run1"):
+def make_job(manager, *, tab=7, run_id="run1", endpoint_id=None):
     """A delivery job through the product writer, with its real attachment."""
     return manager.create_job(
         run_id,
-        {"papSource": {"tabId": tab, "url": PAGE, "chatType": "chatgpt"},
+        {"papSource": {"tabId": tab, "url": PAGE, "chatType": "chatgpt", "endpointId": endpoint_id or f"ep-{tab}", "browserEpoch": "epoch-1", "conversationId": "fixture"},
          "page": PAGE, "chatType": "chatgpt", "chatLabel": "Chat"},
         {"steps": []},
         {"steps": {}},
@@ -310,7 +310,7 @@ class AuthorizationBeforeTerminalOverHttp(unittest.TestCase):
                    "extensionVersion": REQUIRED_EXTENSION_VERSION})
 
     def sent_job_for_tab_7(self):
-        job = make_job(self.writer, tab=7)
+        job = make_job(self.writer, tab=7, endpoint_id="ep-1")
         self.writer.update_from_client(job["runId"], job["jobId"], {
             "event": "CLAIM", "tabId": 7, "leaseToken": "tok", "url": PAGE})
         sent = self.writer.update_from_client(job["runId"], job["jobId"], {
