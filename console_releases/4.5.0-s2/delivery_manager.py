@@ -27,7 +27,28 @@ RETRYABLE_ATTACHMENT_STATES = {'ERROR', 'STALLED'}
 READY_ATTACHMENT_STATES = {'UPLOADED'}
 PENDING_ATTACHMENT_STATES = {'PENDING', 'RETRY_PENDING', 'RECOVER_PENDING'}
 TERMINAL_JOB_STATES = {'SENT', 'CONSUMED', 'SUPERSEDED', 'CANCELLED'}
+
+# Rollout modes for the breaking boundary.
+#
+#   OPEN    normal operation
+#   DRAIN   no new work is handed out and no new claim may be taken; events for
+#           work already claimed are still accepted so it can finish
+#   BARRIER new delivery work is refused outright
+#
+# DRAIN is a pass with an identity of its own, not merely "there are no leases
+# right now". A lease that existed and expired during the pass leaves an
+# outcome nobody can report on, and an empty queue afterwards is not evidence
+# that the outcome is known.
+ROLLOUT_OPEN = 'OPEN'
+ROLLOUT_DRAIN = 'DRAIN'
+ROLLOUT_BARRIER = 'BARRIER'
+ROLLOUT_MODES = (ROLLOUT_OPEN, ROLLOUT_DRAIN, ROLLOUT_BARRIER)
 PAUSED_JOB_STATE = 'PAUSED_AFTER_RESTART'
+NONTERMINAL_JOB_STATES = {
+    'QUEUED', 'SEND_ERROR', 'SEND_REQUESTED', 'UPLOADING', 'PARTIAL',
+    'READY_TO_SEND', 'FILES_READY',
+}
+KNOWN_JOB_STATES = TERMINAL_JOB_STATES | NONTERMINAL_JOB_STATES | {PAUSED_JOB_STATE}
 CLAIM_LEASE_SECONDS = 15
 MAX_AUTO_RECOVERIES = 3
 SMART_ZIP_MAX_BYTES = 30 * 1024 * 1024
@@ -49,6 +70,22 @@ def iso_dt(value: str | None) -> datetime | None:
         return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
     except Exception:
         return None
+
+
+def decision_dt(value: Any) -> datetime | None:
+    """A stored timestamp fit to take a decision on, or None for UNKNOWN.
+
+    The project rule, applied in one place instead of at every call site: a
+    stored time that takes part in a decision must be parseable and must carry
+    an offset. Missing, malformed and naive all answer None here, and the
+    caller decides what refusal means — never what default to substitute.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = iso_dt(value)
+    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
 
 
 def utc_after(seconds: int) -> str:
@@ -617,14 +654,33 @@ class DeliveryManager:
     def _same_page_url(left: str, right: str) -> bool:
         return str(left or '').split('#', 1)[0] == str(right or '').split('#', 1)[0]
 
+    REPLAY_FOUND = 'FOUND'
+    REPLAY_ABSENT = 'ABSENT'
+    REPLAY_UNPROVABLE = 'UNPROVABLE'
+
     def _existing_recovery_replay(
         self,
         source_run_id: str,
         source_job_id: str,
         tab_id: int,
-    ) -> dict[str, Any] | None:
+        page_url: str,
+    ) -> tuple[str, dict[str, Any] | None, str]:
+        """The replay already made for this source, or a stated reason there is none.
+
+        Three answers rather than a job or `None`. The single `None` meant both
+        "no replay exists" and "a replay exists whose identity I cannot read",
+        and the caller acted on the second as though it were the first: it wrote
+        a second delivery and marked the first `SUPERSEDED`. A terminal mutation
+        decided by a hole in the evidence is the thing this block exists to
+        remove.
+
+        The writer stamps every replay with `recoveryReplay: True` and a
+        `recoveryOf` object in the same write. An ordinary delivery carries
+        neither. A half-present or non-canonical pair is therefore persisted
+        contradiction, never proof that the replay is absent.
+        """
         if not self.data_dir.is_dir():
-            return None
+            return self.REPLAY_ABSENT, None, ''
 
         for run_dir in self.data_dir.iterdir():
             if not run_dir.is_dir():
@@ -637,38 +693,205 @@ class DeliveryManager:
                 job_file = path / 'job.json'
                 if not job_file.is_file():
                     continue
-                job = self._load_json(job_file, {})
-                if not isinstance(job, dict):
+                try:
+                    job = json.loads(job_file.read_text('utf-8'))
+                except Exception as exc:
+                    return (self.REPLAY_UNPROVABLE, None,
+                            f'unreadable delivery job {job_file}: {exc}')
+                if not isinstance(job, dict) or not job.get('jobId'):
+                    return (self.REPLAY_UNPROVABLE, None,
+                            f'{job_file} is not a delivery job')
+
+                # Writer contract: ordinary deliveries carry neither field;
+                # recovery replays carry both, in the same persisted write.
+                # A half-present or non-canonical marker is contradictory
+                # evidence, not proof that the row is an ordinary delivery.
+                has_replay_marker = 'recoveryReplay' in job
+                has_recovery_of = 'recoveryOf' in job
+                if not has_replay_marker and not has_recovery_of:
                     continue
 
-                recovery_of = job.get('recoveryOf') if isinstance(job.get('recoveryOf'), dict) else {}
-                if str(recovery_of.get('runId') or '') != str(source_run_id):
-                    continue
-                if str(recovery_of.get('jobId') or '') != str(source_job_id):
+                where = f"run={job.get('runId')} job={job.get('jobId')}"
+                replay_marker = job.get('recoveryReplay')
+                if replay_marker is not True:
+                    return (self.REPLAY_UNPROVABLE, None,
+                            f'{where}: recoveryReplay must be exactly true when '
+                            f'recovery metadata is present: {replay_marker!r}')
+
+                recovery_of = job.get('recoveryOf')
+                if not isinstance(recovery_of, dict):
+                    return (self.REPLAY_UNPROVABLE, None,
+                            f'{where}: recoveryOf is not an object: {recovery_of!r}')
+                replay_run = recovery_of.get('runId')
+                replay_job = recovery_of.get('jobId')
+                if not isinstance(replay_run, str) or not replay_run:
+                    return (self.REPLAY_UNPROVABLE, None,
+                            f'{where}: recoveryOf.runId is not a non-empty string: '
+                            f'{replay_run!r}')
+                if not isinstance(replay_job, str) or not replay_job:
+                    return (self.REPLAY_UNPROVABLE, None,
+                            f'{where}: recoveryOf.jobId is not a non-empty string: '
+                            f'{replay_job!r}')
+                same_source = (
+                    replay_run == str(source_run_id)
+                    and replay_job == str(source_job_id)
+                )
+
+                # A replay-like row must be a canonical writer row before it may
+                # be skipped for naming another source. Otherwise a damaged
+                # foreign replay would disappear from the proof simply because
+                # recoveryOf happened to differ first. Validate the page field
+                # explicitly before classify_target: that shared classifier may
+                # prove OTHER from tabId alone and then intentionally stop before
+                # reading url, while the replay writer contract requires both
+                # stored coordinates themselves to be usable.
+                raw_target = job.get('target')
+                if isinstance(raw_target, dict):
+                    if 'url' not in raw_target:
+                        return (self.REPLAY_UNPROVABLE, None,
+                                f'{where}: target has no url')
+                    if not isinstance(raw_target.get('url'), str):
+                        return (self.REPLAY_UNPROVABLE, None,
+                                f'{where}: target url is not a string: '
+                                f'{raw_target.get("url")!r}')
+
+                verdict, why = self.classify_target(
+                    job, tab_id=tab_id, page_url=page_url)
+                if verdict == self.TARGET_UNPROVABLE:
+                    return self.REPLAY_UNPROVABLE, None, f'{where}: {why}'
+
+                status = job.get('status')
+                if not isinstance(status, str) or status not in KNOWN_JOB_STATES:
+                    return (self.REPLAY_UNPROVABLE, None,
+                            f'{where}: replay status is not a canonical delivery '
+                            f'state: {status!r}')
+
+                dispatch_epoch = job.get('dispatchEpoch')
+                if status == PAUSED_JOB_STATE:
+                    # pause_unfinished_jobs_after_restart is the writer of the
+                    # paused form and deliberately clears dispatchEpoch.  The
+                    # replay still exists; a restart is not permission to clone
+                    # it again.
+                    if dispatch_epoch is not None:
+                        return (self.REPLAY_UNPROVABLE, None,
+                                f'{where}: paused replay carries dispatchEpoch: '
+                                f'{dispatch_epoch!r}')
+                elif status in {'SUPERSEDED', 'CANCELLED'} and dispatch_epoch is None:
+                    # A terminal replay can be produced from the paused writer
+                    # form without ever being resumed. Prepare retires an
+                    # unleased PAUSED_AFTER_RESTART job in-place, so
+                    # SUPERSEDED legitimately retains dispatchEpoch=None.  Null
+                    # is therefore canonical only when the persisted pause
+                    # provenance proves that route; accepting a bare null on a
+                    # terminal row would turn the review-25 corruption back
+                    # into a legal lifecycle.
+                    paused_at = job.get('pausedAt')
+                    paused_from_epoch = job.get('pausedFromDispatchEpoch')
+                    if (
+                        job.get('pauseReason') != 'BACKEND_RESTART'
+                        or decision_dt(paused_at) is None
+                        or 'pausedFromDispatchEpoch' not in job
+                        or (
+                            paused_from_epoch is not None
+                            and (
+                                not isinstance(paused_from_epoch, str)
+                                or not paused_from_epoch
+                            )
+                        )
+                    ):
+                        return (self.REPLAY_UNPROVABLE, None,
+                                f'{where}: terminal replay has null dispatchEpoch '
+                                f'without canonical restart-pause provenance')
+                else:
+                    if not isinstance(dispatch_epoch, str) or not dispatch_epoch:
+                        return (self.REPLAY_UNPROVABLE, None,
+                                f'{where}: replay dispatchEpoch is not a non-empty '
+                                f'string: {dispatch_epoch!r}')
+
+                    if status not in TERMINAL_JOB_STATES and dispatch_epoch != self.dispatch_epoch:
+                        # A non-terminal job from another epoch is supposed to
+                        # have been rewritten to PAUSED_AFTER_RESTART before
+                        # requests are served. Seeing the old live form here is
+                        # contradictory persisted state, not evidence that no
+                        # replay exists.
+                        return (self.REPLAY_UNPROVABLE, None,
+                                f'{where}: non-terminal replay belongs to dispatchEpoch '
+                                f'{dispatch_epoch!r}, current is {self.dispatch_epoch!r}')
+
+                if not same_source:
+                    # Only after the whole persisted writer row is usable may a
+                    # different recoveryOf become a proven identity skip.
                     continue
 
-                target = job.get('target') if isinstance(job.get('target'), dict) else {}
-                if int(target.get('tabId') or -1) != int(tab_id):
-                    continue
+                if verdict == self.TARGET_OTHER:
+                    # recoveryOf already proves that this row claims to replay
+                    # this exact source. The writer derives its tab/page from
+                    # that source, so a different address is contradictory
+                    # persisted evidence, not a legitimate replay elsewhere.
+                    return (self.REPLAY_UNPROVABLE, None,
+                            f'{where}: replay target contradicts its source: {why}')
 
-                if str(job.get('status') or '') in TERMINAL_JOB_STATES | {PAUSED_JOB_STATE}:
-                    continue
+                if status in {'SUPERSEDED', 'CANCELLED'}:
+                    # Retiring a replay is not proof that its delivery happened.
+                    # create_job can supersede a QUEUED/PENDING replay before it
+                    # was ever inserted or sent, and returning that terminal row
+                    # as FOUND makes recovery impossible forever.  Conversely,
+                    # absence must be proved too: a malformed sendState cannot be
+                    # interpreted as "not sent" and used to manufacture another
+                    # replay.
+                    send_state = job.get('sendState')
+                    canonical_send_states = {
+                        'NOT_REQUESTED', 'SEND_REQUESTED', 'SEND_ERROR',
+                        'SENT', 'MANUAL_SENT',
+                    }
+                    if not isinstance(send_state, str) or send_state not in canonical_send_states:
+                        return (self.REPLAY_UNPROVABLE, None,
+                                f'{where}: terminal replay sendState is not '
+                                f'canonical: {send_state!r}')
+                    if send_state == 'SEND_REQUESTED':
+                        # A click was requested but no outcome was persisted.
+                        # That is neither a delivered replay nor proof that no
+                        # delivery happened, so it cannot be turned into ABSENT.
+                        return (self.REPLAY_UNPROVABLE, None,
+                                f'{where}: retired replay has an unresolved '
+                                f'SEND_REQUESTED outcome')
+                    if send_state in {'NOT_REQUESTED', 'SEND_ERROR'}:
+                        # This replay exists as history, but not as the delivered
+                        # result whose idempotence the helper is answering. Keep
+                        # scanning in case a later canonical replay for the same
+                        # source exists; if none does, the answer is ABSENT and a
+                        # fresh replay may be created.
+                        continue
 
-                if str(job.get('dispatchEpoch') or '') != self.dispatch_epoch:
-                    continue
+                # SENT/CONSUMED prove delivery by status. SUPERSEDED/CANCELLED
+                # reach here only when sendState independently proves submission.
+                # Paused/non-terminal rows still represent an outstanding replay
+                # and remain FOUND for idempotence.
+                return self.REPLAY_FOUND, job, ''
 
-                return job
-
-        return None
+        return self.REPLAY_ABSENT, None, ''
 
     @staticmethod
-    def _job_submitted_at(job: dict[str, Any]) -> datetime | None:
-        return (
-            iso_dt(job.get('consumedAt'))
-            or iso_dt(job.get('sentAt'))
-            or iso_dt(job.get('updatedAt'))
-            or iso_dt(job.get('createdAt'))
-        )
+    def _job_submitted_at(job: dict[str, Any]) -> tuple[datetime | None, str]:
+        """When this delivery was submitted, or why that cannot be established.
+
+        The first field that carries a value answers, and if that value is not
+        a usable timestamp the answer is a refusal rather than the next field
+        down: falling through would let a damaged `consumedAt` be silently
+        replaced by `createdAt` and change which delivery is called the latest.
+
+        Returned rather than raised because the callers differ: one refuses the
+        whole lookup, the other prefers the source it can prove.
+        """
+        for field in ('consumedAt', 'sentAt', 'updatedAt', 'createdAt'):
+            raw = job.get(field)
+            if raw in (None, ''):
+                continue
+            parsed = decision_dt(raw)
+            if parsed is None:
+                return None, f'{field} is not a timezone-aware timestamp: {raw!r}'
+            return parsed, ''
+        return None, ''
 
     def find_latest_submitted_job(
         self,
@@ -676,12 +899,27 @@ class DeliveryManager:
         tab_id: int,
         page_url: str,
         max_age_seconds: int = 2 * 60 * 60,
-    ) -> dict[str, Any] | None:
-        """Find the most recently submitted PAP delivery for this exact tab/page."""
+    ) -> tuple[str, dict[str, Any] | None, str]:
+        """The newest submitted delivery for this tab/page, as one of three answers.
+
+        `(SUBMITTED_FOUND, job, "")`, `(SUBMITTED_ABSENT, None, "")` or
+        `(SUBMITTED_UNPROVABLE, None, reason)`.
+
+        Two answers used to be one. Returning `None` for "there is nothing" and
+        for "there is something and I cannot tell which is newest" let the
+        caller read the second as the first and fall back to an explicitly named
+        older source — UNKNOWN turned into absence, and a recovery replay was
+        built from a delivery that had been superseded.
+
+        Unprovable has two shapes here, and they are the two already settled for
+        Prepare order: a submitted time that is missing an offset or unreadable,
+        and two candidates sharing the newest instant, which is provable time
+        that still establishes no order.
+        """
         candidates: list[tuple[datetime, dict[str, Any]]] = []
 
         if not self.data_dir.is_dir():
-            return None
+            return self.SUBMITTED_ABSENT, None, ''
 
         current = utc_now_dt()
 
@@ -698,16 +936,28 @@ class DeliveryManager:
                 if not job_file.is_file():
                     continue
 
-                job = self._load_json(job_file, {})
-                if not isinstance(job, dict):
-                    continue
+                # Read failures are evidence, not empty space. This used to go
+                # through the tolerant loader, which answers `{}` for anything
+                # it cannot parse; the empty target then matched no tab and the
+                # damaged job disappeared from the reckoning. It may be the
+                # newer delivery for this very tab, so nothing here can be
+                # called the latest while it cannot be read.
+                try:
+                    job = json.loads(job_file.read_text('utf-8'))
+                except Exception as exc:
+                    return (self.SUBMITTED_UNPROVABLE, None,
+                            f'unreadable delivery job {job_file}: {exc}')
+                if not isinstance(job, dict) or not job.get('jobId'):
+                    return (self.SUBMITTED_UNPROVABLE, None,
+                            f'{job_file} is not a delivery job')
 
-                target = job.get('target') if isinstance(job.get('target'), dict) else {}
-                if int(target.get('tabId') or -1) != int(tab_id):
-                    continue
-
-                target_url = str(target.get('url') or '')
-                if target_url and page_url and not self._same_page_url(target_url, page_url):
+                verdict, why = self.classify_target(job, tab_id=tab_id, page_url=page_url)
+                if verdict == self.TARGET_UNPROVABLE:
+                    return (self.SUBMITTED_UNPROVABLE, None,
+                            f"run={job.get('runId')} job={job.get('jobId')}: {why}")
+                if verdict == self.TARGET_OTHER:
+                    # Proven to belong elsewhere: a fact about the delivery,
+                    # and the only reason a job leaves this scan on its address.
                     continue
 
                 status = str(job.get('status') or '')
@@ -719,21 +969,51 @@ class DeliveryManager:
                 if not submitted:
                     continue
 
-                submitted_at = self._job_submitted_at(job)
+                where = f"run={job.get('runId')} job={job.get('jobId')}"
+                submitted_at, unprovable = self._job_submitted_at(job)
+                if unprovable:
+                    # UNKNOWN, not absent. Skipping this job would name some
+                    # other delivery the latest on evidence that has a hole in
+                    # it, and comparing the value would raise a bare TypeError
+                    # from inside recovery — which is what it used to do.
+                    return self.SUBMITTED_UNPROVABLE, None, f'{where}: {unprovable}'
                 if submitted_at is None:
-                    continue
+                    # The status already proves this delivery was submitted, so
+                    # it is not absent — what is missing is any evidence of
+                    # when. Skipping it would let an older delivery be called
+                    # the latest over a job that may well be newer.
+                    return (self.SUBMITTED_UNPROVABLE, None,
+                            f'{where}: submitted with no timestamp to place it in time')
 
                 age = (current - submitted_at).total_seconds()
-                if age < 0 or age > max_age_seconds:
+                if age < 0:
+                    # Sent after the current moment: the stored time contradicts
+                    # itself. Being out of the recovery window is a proven fact
+                    # about a delivery, and this is not that — it is a time
+                    # nobody can use, which is exactly the case the invariant
+                    # calls UNKNOWN.
+                    return (self.SUBMITTED_UNPROVABLE, None,
+                            f'{where}: submitted time is in the future '
+                            f'({submitted_at.isoformat()})')
+                if age > max_age_seconds:
+                    # Proven older than the recovery window: legitimately not a
+                    # candidate, and the only skip left in this loop.
                     continue
 
                 candidates.append((submitted_at, job))
 
         if not candidates:
-            return None
+            return self.SUBMITTED_ABSENT, None, ''
 
         candidates.sort(key=lambda row: row[0], reverse=True)
-        return candidates[0][1]
+        if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+            # Equal timestamps are not an order. Taking the first of them would
+            # make `Path.iterdir` decide which delivery a replay is built from,
+            # exactly as it once decided which delivery was destroyed.
+            return (self.SUBMITTED_UNPROVABLE, None,
+                    f'two submitted deliveries share the newest instant '
+                    f'({candidates[0][0].isoformat()})')
+        return self.SUBMITTED_FOUND, candidates[0][1], ''
 
     def resolve_recovery_source(
         self,
@@ -761,23 +1041,34 @@ class DeliveryManager:
                     status in {'CONSUMED', 'SENT'}
                     or send_state in {'MANUAL_SENT', 'SENT'}
                 )
-                same_target = (
-                    int(target.get('tabId') or -1) == int(tab_id)
-                    and (
-                        not str(target.get('url') or '')
-                        or not page_url
-                        or self._same_page_url(str(target.get('url') or ''), page_url)
-                    )
-                )
-                if submitted and same_target:
+                verdict, why = self.classify_target(candidate, tab_id=tab_id, page_url=page_url)
+                if verdict == self.TARGET_UNPROVABLE:
+                    # The same decision as the scan takes, so it needs the same
+                    # rule: a source whose address cannot be read is not quietly
+                    # dropped in favour of whatever else is lying around.
+                    raise DeliveryError(
+                        f'RECOVERY_SOURCE_UNPROVABLE: the named source has an '
+                        f'unreadable target: {why}')
+                if submitted and verdict == self.TARGET_MATCH:
                     explicit = candidate
-            except DeliveryError:
+            except DeliveryError as exc:
+                if 'RECOVERY_SOURCE_UNPROVABLE' in str(exc):
+                    raise
                 explicit = None
 
-        latest = self.find_latest_submitted_job(
+        state, latest, reason = self.find_latest_submitted_job(
             tab_id=tab_id,
             page_url=page_url,
         )
+
+        if state == self.SUBMITTED_UNPROVABLE:
+            # The newest submitted delivery cannot be established. Falling
+            # back to the source the browser named would build a replay from a
+            # delivery that may well have been superseded by the one that
+            # cannot be read — a guess wearing the clothes of a reference.
+            raise DeliveryError(
+                f'RECOVERY_SOURCE_UNPROVABLE: cannot establish the latest '
+                f'submitted delivery for this chat tab/page: {reason}')
 
         if explicit is None and latest is None:
             raise DeliveryError(
@@ -787,11 +1078,18 @@ class DeliveryManager:
         if explicit is None:
             return latest, 'LATEST_SUBMITTED_SAME_TAB_PAGE'
 
+        explicit_at, explicit_bad = self._job_submitted_at(explicit)
+        if explicit_bad:
+            # The named source carries a time nobody can compare. It is not
+            # preferred by default just because it was named.
+            raise DeliveryError(
+                f'RECOVERY_SOURCE_UNPROVABLE: the named source has no usable '
+                f'submitted time: {explicit_bad}')
+
         if latest is None:
             return explicit, 'BROWSER_SOURCE_REFERENCE'
 
-        explicit_at = self._job_submitted_at(explicit)
-        latest_at = self._job_submitted_at(latest)
+        latest_at, _latest_bad = self._job_submitted_at(latest)
 
         if latest_at and (not explicit_at or latest_at > explicit_at):
             return latest, 'LATEST_SUBMITTED_SAME_TAB_PAGE'
@@ -838,22 +1136,33 @@ class DeliveryManager:
             if target_url and page_url and not self._same_page_url(target_url, page_url):
                 raise DeliveryError('recovery source belongs to another chat page')
 
-            submitted_at = (
-                iso_dt(source.get('consumedAt'))
-                or iso_dt(source.get('sentAt'))
-                or iso_dt(source.get('updatedAt'))
-                or iso_dt(source.get('createdAt'))
-            )
+            # The same rule as everywhere else, through the same helper. This
+            # was a second, weaker copy of it: it accepted a naive stored value
+            # and then subtracted it from an aware one.
+            submitted_at, unprovable = self._job_submitted_at(source)
+            if unprovable:
+                raise DeliveryError(
+                    f'RECOVERY_SOURCE_UNPROVABLE: the source has no usable '
+                    f'submitted time: {unprovable}')
             if submitted_at is not None:
                 age_seconds = (utc_now_dt() - submitted_at).total_seconds()
                 if age_seconds > 2 * 60 * 60:
                     raise DeliveryError('recovery source is older than 2 hours')
 
-            existing = self._existing_recovery_replay(
+            state, existing, why = self._existing_recovery_replay(
                 source_run_id,
                 source_job_id,
                 tab_id,
+                page_url,
             )
+            if state == self.REPLAY_UNPROVABLE:
+                # Before `new_job_dir`, before any write. Whether a replay for
+                # this source already exists cannot be established, so creating
+                # a second one would be a guess with a delivery at the end of
+                # it — and retiring the first would bury the evidence.
+                raise DeliveryError(
+                    f'RECOVERY_REPLAY_UNPROVABLE: cannot establish whether a '
+                    f'recovery replay already exists for this delivery: {why}')
             if existing is not None:
                 return existing
 
@@ -1034,39 +1343,107 @@ class DeliveryManager:
         return changed
 
     def supersede_older_jobs_for_tab(self, target_tab_id: int, keep_run_id: str, keep_job_id: str) -> int:
+        """Retire earlier work for this tab, but never over a lease.
+
+        Superseding is terminal, and a terminal job stops accepting events: its
+        RELEASE is dropped by the idempotent early return, `recover_expired_leases`
+        skips terminal jobs, and the drain then reads the pair as a contradiction
+        it can never resolve — one new Prepare while a delivery was claimed left
+        the boundary refusing for ever.
+
+        Clearing the lease instead is not the alternative it looks like: the
+        claim was live, so its outcome is unknown, and erasing the trace is
+        exactly the substitution of absence for the unknown this block exists to
+        remove. So the older job keeps its lease and its identity, and delivery
+        for the tab stays single-flight until that lease ends — `poll_for_tab`
+        refuses to hand out the newer job in the meantime.
+
+        Recovery runs first so an expired lease is decided after it has been
+        recovered, not while it still looks outstanding.
+        """
         changed = 0
         if not self.data_dir.is_dir():
             return changed
-        for run_dir in self.data_dir.iterdir():
-            if not run_dir.is_dir():
-                continue
-            delivery_root = run_dir / 'executor' / 'delivery'
-            if not delivery_root.is_dir():
-                continue
-            for path in delivery_root.iterdir():
-                job_file = path / 'job.json'
-                if not job_file.is_file():
+        with self.lock:
+            self.recover_expired_leases()
+            for run_dir in self.data_dir.iterdir():
+                if not run_dir.is_dir():
                     continue
-                job = self._load_json(job_file, {})
-                if not isinstance(job, dict):
+                delivery_root = run_dir / 'executor' / 'delivery'
+                if not delivery_root.is_dir():
                     continue
-                if str(job.get('runId') or '') == str(keep_run_id) and str(job.get('jobId') or '') == str(keep_job_id):
-                    continue
-                target = job.get('target') if isinstance(job.get('target'), dict) else {}
-                try:
-                    same_tab = int(target.get('tabId') or -1) == int(target_tab_id)
-                except Exception:
-                    same_tab = False
-                if not same_tab:
-                    continue
-                if str(job.get('status') or '') in TERMINAL_JOB_STATES:
-                    continue
-                job['status'] = 'SUPERSEDED'
-                job['supersededAt'] = utc_now()
-                job['supersededBy'] = {'runId': keep_run_id, 'jobId': keep_job_id}
-                self.save_job(job)
-                changed += 1
+                for path in delivery_root.iterdir():
+                    job_file = path / 'job.json'
+                    if not job_file.is_file():
+                        continue
+                    job = self._load_json(job_file, {})
+                    if not isinstance(job, dict):
+                        continue
+                    if str(job.get('runId') or '') == str(keep_run_id) and str(job.get('jobId') or '') == str(keep_job_id):
+                        continue
+                    verdict, _why = self.classify_target(job, tab_id=target_tab_id)
+                    if verdict != self.TARGET_MATCH:
+                        # Proven elsewhere, or an address nobody can read.
+                        # Neither is a job this call may retire: the second
+                        # would be a terminal write decided by a shrug.
+                        continue
+                    if str(job.get('status') or '') in TERMINAL_JOB_STATES:
+                        continue
+                    kind, _detail = self.classify_lease(job)
+                    if kind != self.LEASE_NONE:
+                        # ACTIVE: a client is performing this delivery now.
+                        # EXPIRED: it survived the recovery pass above, so it
+                        # belongs to another dispatch epoch and its outcome is
+                        # not ours to declare.
+                        # INVALID: contradictory evidence; superseding it would
+                        # bury the only record that something was lost.
+                        continue
+                    job['status'] = 'SUPERSEDED'
+                    job['supersededAt'] = utc_now()
+                    job['supersededBy'] = {'runId': keep_run_id, 'jobId': keep_job_id}
+                    self.save_job(job)
+                    changed += 1
         return changed
+
+    def outstanding_lease_for_tab(self, tab_id: int) -> dict[str, Any] | None:
+        """The delivery that still owes this tab an outcome, if there is one.
+
+        Single-flight is a property of the tab, not of one job: two jobs both
+        addressed to the same browser tab cannot be performed at once, and the
+        older one is not superseded while it holds a lease. Without this the
+        newer job would simply be handed out next to the claimed one.
+
+        Every state except NO_LEASE counts. EXPIRED used to be let through on
+        the reasoning that recovery had already run — but recovery and this
+        decision read the clock separately, so a lease that was ACTIVE during
+        the pass, and therefore correctly left alone, can be EXPIRED by the
+        time it is classified here. An expired lease that has not been through
+        recovery is an outcome nobody has accounted for, which is precisely
+        what must not open the tab. Blocking it costs one poll: the next one
+        recovers it first and then proceeds.
+        """
+        for job, error in self._iter_jobs_strict():
+            if error is not None:
+                # Unreadable is not empty. It may be the very job holding the
+                # lease, so the tab is treated as busy until someone can read it.
+                return {'runId': None, 'jobId': None, 'lease': self.LEASE_INVALID,
+                        'reason': f'unreadable job: {error}'}
+            verdict, why = self.classify_target(job, tab_id=tab_id)
+            if verdict == self.TARGET_UNPROVABLE:
+                # Whose tab this job belongs to cannot be read, so it may be
+                # this one, and it may be holding the outcome this tab is
+                # waiting for. The same answer an unreadable job already gets.
+                return {'runId': job.get('runId'), 'jobId': job.get('jobId'),
+                        'lease': self.LEASE_INVALID, 'reason': f'unreadable target: {why}'}
+            if verdict == self.TARGET_OTHER:
+                continue
+            if str(job.get('status') or '') in TERMINAL_JOB_STATES | {PAUSED_JOB_STATE}:
+                continue
+            kind, detail = self.classify_lease(job)
+            if kind != self.LEASE_NONE:
+                return {'runId': job.get('runId'), 'jobId': job.get('jobId'),
+                        'lease': kind, 'reason': detail or kind}
+        return None
 
     def _derive_job_status(self, job: dict[str, Any]) -> None:
         if str(job.get('status') or '') in TERMINAL_JOB_STATES | {PAUSED_JOB_STATE}:
@@ -1099,17 +1476,441 @@ class DeliveryManager:
         else:
             job['status'] = 'QUEUED'
 
+
+    # ---- rollout mode -----------------------------------------------------
+
+    def _rollout_path(self) -> Path:
+        path = self.data_dir.parent / 'runtime' / 'delivery-rollout.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _unsafe_state(reason: str) -> dict[str, Any]:
+        """State that cannot be trusted at all, as distinct from a latched drain.
+
+        These are different things and were conflated. A valid DRAIN with the
+        latch set still permits events for already-claimed work, so presenting
+        an unreadable file as a latched DRAIN reopened the delivery plane
+        exactly when the persisted BARRIER had been damaged.
+        """
+        return {'mode': ROLLOUT_DRAIN, 'drainId': None, 'unsafe': True,
+                'valid': False, 'stateError': reason,
+                'unsafeReasons': [reason], 'startedAt': None}
+
+    @staticmethod
+    def _aware_ts(value: Any) -> bool:
+        return decision_dt(value) is not None
+
+    def rollout_state(self) -> dict[str, Any]:
+        """Read the rollout state, treating anything unexpected as unsafe.
+
+        Filling in defaults for a partially written DRAIN would invent the very
+        fact the latch exists to preserve: this writer always stores drainId,
+        startedAt, unsafe and unsafeReasons together, so a DRAIN missing any of
+        them was not written by it.
+        """
+        path = self._rollout_path()
+        if not path.is_file():
+            return {'mode': ROLLOUT_OPEN, 'drainId': None, 'unsafe': False,
+                    'valid': True, 'unsafeReasons': [], 'startedAt': None}
+        try:
+            body = json.loads(path.read_text('utf-8'))
+        except Exception:
+            return self._unsafe_state('rollout state unreadable')
+        if not isinstance(body, dict):
+            return self._unsafe_state('rollout state is not an object')
+        mode = body.get('mode')
+        if mode not in ROLLOUT_MODES:
+            return self._unsafe_state(f'unknown rollout mode {mode!r}')
+        if mode == ROLLOUT_OPEN:
+            # Absence of the file means OPEN; this writer never stores an OPEN
+            # file. So a stored OPEN is not a canonical state, and accepting it
+            # meant that damaging one field of a valid BARRIER — the word
+            # BARRIER itself — reopened the delivery plane while the rest of the
+            # record still said otherwise.
+            return self._unsafe_state(
+                'rollout state stores OPEN, which this writer never produces')
+        if not isinstance(body.get('drainId'), str) or not body['drainId'].strip():
+            return self._unsafe_state('rollout state has no drainId')
+        if not self._aware_ts(body.get('startedAt')):
+            return self._unsafe_state('rollout startedAt is not a timezone-aware timestamp')
+        if not isinstance(body.get('unsafe'), bool):
+            return self._unsafe_state('rollout state has no unsafe flag')
+        reasons = body.get('unsafeReasons')
+        if not isinstance(reasons, list) or not all(isinstance(r, str) for r in reasons):
+            return self._unsafe_state('rollout unsafeReasons is not a list of strings')
+        # This writer never stores one without the other. A cleared flag beside
+        # recorded reasons is not a safe drain; it is a state nobody wrote.
+        if bool(body['unsafe']) != bool(reasons):
+            return self._unsafe_state(
+                'rollout unsafe flag contradicts unsafeReasons')
+        # Canonical shapes, symmetric on purpose: a BARRIER carries enteredAt
+        # and a DRAIN does not. Without the second half, damaging one word of a
+        # valid BARRIER turned it into an acceptable DRAIN with the barrier's
+        # own timestamp still inside.
+        if mode == ROLLOUT_BARRIER and not self._aware_ts(body.get('enteredAt')):
+            return self._unsafe_state('barrier enteredAt is not a timezone-aware timestamp')
+        if mode == ROLLOUT_DRAIN and body.get('enteredAt') is not None:
+            return self._unsafe_state('drain state carries a barrier enteredAt')
+        body['valid'] = True
+        return body
+
+    def _write_rollout(self, body: dict[str, Any]) -> None:
+        atomic_write_json(self._rollout_path(), body)
+
+    def begin_drain(self) -> dict[str, Any]:
+        """Start a drain pass with its own identity.
+
+        Restarting the pass is what clears the latch, and only an operator can
+        do that: an automatic reset would turn "we lost track of an outcome"
+        into "there is nothing outstanding".
+        """
+        state = {'mode': ROLLOUT_DRAIN, 'drainId': uuid.uuid4().hex,
+                 'startedAt': utc_now(), 'unsafe': False, 'unsafeReasons': []}
+        self._write_rollout(state)
+        return state
+
+    def mark_unsafe(self, reason: str) -> dict[str, Any]:
+        """Latch the drain as unsafe. Monotonic within a pass."""
+        state = self.rollout_state()
+        if state.get('mode') != ROLLOUT_DRAIN:
+            return state
+        reasons = list(state.get('unsafeReasons') or [])
+        if reason not in reasons:
+            reasons.append(reason)
+        state['unsafe'] = True
+        state['unsafeReasons'] = reasons
+        self._write_rollout(state)
+        return state
+
+
+    # ---- lease evidence during a drain ------------------------------------
+
+    TARGET_MATCH = 'MATCH'
+    TARGET_OTHER = 'OTHER'
+    TARGET_UNPROVABLE = 'UNPROVABLE'
+
+    def _require_target_tab(self, job: dict[str, Any], requested_tab: Any) -> None:
+        """This caller's tab is the tab this job is addressed to, provably.
+
+        Both browser-facing paths ask the same question, so both ask it the
+        same way. Anything other than a proven match is a refusal: a target
+        nobody can read is not authorization, and neither is one that only
+        looks like a match after coercion.
+        """
+        try:
+            tab_id = int(requested_tab)
+        except (TypeError, ValueError):
+            raise DeliveryError('wrong tabId for delivery job: no tab given')
+        verdict, why = self.classify_target(job, tab_id=tab_id)
+        if verdict != self.TARGET_MATCH:
+            raise DeliveryError(f'wrong tabId for delivery job: {why or verdict}')
+
+    def classify_target(self, job: dict[str, Any], *, tab_id: int,
+                        page_url: str = '') -> tuple[str, str]:
+        """Whether this stored job is addressed to this tab and page.
+
+        Three answers, for the same reason the lease and the submitted time
+        have three. A stored target saying tab 8 while tab 7 is asking is a
+        fact: the job belongs elsewhere and is rightly skipped. A target that
+        is missing, is not an object, has no tabId, or has one that is not a
+        number proves nothing of the sort — and it used to be read through a
+        shrug that turned all of it into `{}` and then into tab `-1`, which
+        compares unequal to every real tab. An address nobody can read became
+        somebody else's address, and the older delivery behind it was named
+        the proven latest. The unusable value had a second exit: `int('bad')`
+        raised straight past the three-valued answer.
+
+        An empty stored url is the writer's own way of recording a target with
+        no page, so it keeps matching. A url of the wrong type does not: making
+        text out of it invents a page and then rules the job out for being on
+        the wrong one.
+        """
+        raw = job.get('target')
+        if not isinstance(raw, dict):
+            return self.TARGET_UNPROVABLE, f'target is not an object: {raw!r}'
+        if 'tabId' not in raw:
+            return self.TARGET_UNPROVABLE, 'target has no tabId'
+        stored_tab = raw.get('tabId')
+        if isinstance(stored_tab, bool) or not isinstance(stored_tab, (int, str)):
+            return self.TARGET_UNPROVABLE, f'target tabId is not a number: {stored_tab!r}'
+        try:
+            stored_tab = int(stored_tab)
+        except (TypeError, ValueError):
+            return self.TARGET_UNPROVABLE, f'target tabId is not a number: {raw.get("tabId")!r}'
+        if stored_tab != int(tab_id):
+            return self.TARGET_OTHER, f'target tabId is {stored_tab}'
+
+        if 'url' not in raw:
+            # The writer stores a url on every target, so an absent one is
+            # damage rather than the canonical empty. Answering both the same
+            # way made a missing page into a page that matches anything: a
+            # delivery addressed elsewhere became the proven latest here, and
+            # a queued job for another page could be handed to this one.
+            return self.TARGET_UNPROVABLE, 'target has no url'
+        stored_url = raw['url']
+        if not isinstance(stored_url, str):
+            return self.TARGET_UNPROVABLE, f'target url is not a string: {stored_url!r}'
+        if stored_url == '':
+            # The writer's own record of a target with no page: it matches, and
+            # it is the only shape of "no page" that does.
+            return self.TARGET_MATCH, ''
+        if page_url and not self._same_page_url(stored_url, page_url):
+            return self.TARGET_OTHER, f'target url is {stored_url}'
+        return self.TARGET_MATCH, ''
+
+    SUBMITTED_FOUND = 'FOUND'
+    SUBMITTED_ABSENT = 'ABSENT'
+    SUBMITTED_UNPROVABLE = 'UNPROVABLE'
+
+    LEASE_NONE = 'NO_LEASE'
+    LEASE_ACTIVE = 'ACTIVE'
+    LEASE_EXPIRED = 'EXPIRED'
+    LEASE_INVALID = 'INVALID'
+
+    def classify_lease(self, job: dict[str, Any]) -> tuple[str, str]:
+        """Classify the lease trace on disk, not merely whether it is live now.
+
+        `_lease_is_active` answers False for a missing lease and for a
+        contradictory one alike, and the drain read that as "nothing here".
+        A half-written lease is an unknown outcome, not an absent one, so the
+        two must be told apart before the boundary closes over them.
+        """
+        token = job.get('claimLeaseToken')
+        expires_raw = job.get('claimExpiresAt')
+        # CLAIM writes these four together and _clear_lease removes them
+        # together, so any subset is a half-written trace, not an absent lease.
+        # clientHeartbeatAt is deliberately excluded: it outlives _clear_lease.
+        claimed_by = job.get('claimedBy')
+        present = {
+            'claimLeaseToken': isinstance(token, str) and token.strip() != '',
+            'claimExpiresAt': isinstance(expires_raw, str) and expires_raw.strip() != '',
+            'claimHeartbeatAt': isinstance(job.get('claimHeartbeatAt'), str)
+                                and str(job.get('claimHeartbeatAt')).strip() != '',
+            'claimedBy': isinstance(claimed_by, dict) and bool(claimed_by),
+        }
+        if not any(present.values()):
+            return self.LEASE_NONE, ''
+        missing = [name for name, ok in present.items() if not ok]
+        if missing:
+            return self.LEASE_INVALID, 'incomplete lease trace, missing ' + ', '.join(missing)
+        if not self._aware_ts(job.get('claimHeartbeatAt')):
+            return self.LEASE_INVALID, 'claimHeartbeatAt is not a timezone-aware timestamp'
+        # claimedBy is the provenance CLAIM records: which tab took the lease,
+        # where, when, and under which token. Validated against that shape
+        # rather than a simpler one — a classifier that disagrees with the
+        # writer rejects leases the server itself created.
+        if not isinstance(claimed_by.get('tabId'), int) or isinstance(claimed_by.get('tabId'), bool):
+            return self.LEASE_INVALID, 'claimedBy.tabId is not an integer'
+        if not isinstance(claimed_by.get('url'), str):
+            return self.LEASE_INVALID, 'claimedBy.url is not a string'
+        if not self._aware_ts(claimed_by.get('at')):
+            return self.LEASE_INVALID, 'claimedBy.at is not a timezone-aware timestamp'
+        claimed_token = claimed_by.get('leaseToken')
+        if not isinstance(claimed_token, str) or claimed_token.strip() != str(token).strip():
+            return self.LEASE_INVALID, 'claimedBy.leaseToken disagrees with claimLeaseToken'
+        has_token = True
+        has_expiry = True
+        expires = iso_dt(expires_raw)
+        if expires is None:
+            return self.LEASE_INVALID, f'unreadable claimExpiresAt {expires_raw!r}'
+        if expires.tzinfo is None or expires.utcoffset() is None:
+            return self.LEASE_INVALID, f'claimExpiresAt has no timezone: {expires_raw!r}'
+        if expires > utc_now_dt():
+            return self.LEASE_ACTIVE, ''
+        return self.LEASE_EXPIRED, ''
+
+    def _drain_reconcile(self) -> None:
+        """Latch anything a drain cannot account for, across every process.
+
+        Deliberately ignores dispatchEpoch. `recover_expired_leases` skips jobs
+        of a previous epoch, so a console restarted mid-drain stopped seeing the
+        lease it was waiting on: while alive it blocked the barrier, and the
+        moment it expired it vanished from the check entirely and the barrier
+        opened. Work outstanding from the old process is still outstanding.
+        """
+        if str(self.rollout_state().get('mode') or '') != ROLLOUT_DRAIN:
+            return
+        for job, error in self._iter_jobs_strict():
+            if error is not None:
+                self.mark_unsafe(f'unreadable delivery job during drain: {error}')
+                continue
+            if str(job.get('status') or '') in TERMINAL_JOB_STATES:
+                continue
+            kind, detail = self.classify_lease(job)
+            if kind == self.LEASE_EXPIRED:
+                self.mark_unsafe(
+                    f"lease expired during drain: run={job.get('runId')} "
+                    f"job={job.get('jobId')} status={job.get('status')}")
+            elif kind == self.LEASE_INVALID:
+                self.mark_unsafe(
+                    f"invalid lease state during drain: run={job.get('runId')} "
+                    f"job={job.get('jobId')}: {detail}")
+
+    def drain_status(self) -> dict[str, Any]:
+        """What still stands between this drain and the barrier."""
+        state = self.rollout_state()
+        outstanding: list[dict[str, Any]] = []
+        for job, error in self._iter_jobs_strict():
+            if error is not None:
+                # A delivery job that cannot be read is an unknown outcome, not
+                # an absent one. Tolerant loading turned it into {} and it
+                # disappeared from the check entirely.
+                outstanding.append({'runId': None, 'jobId': None,
+                                    'reason': f'unreadable job: {error}'})
+                continue
+            status = str(job.get('status') or '')
+            if status in TERMINAL_JOB_STATES:
+                kind, detail = self.classify_lease(job)
+                if kind != self.LEASE_NONE:
+                    # A finished job still holding a lease is a contradiction,
+                    # not silence: either the lease was never ended or the job
+                    # was terminated under someone who still held it.
+                    outstanding.append({**{'runId': job.get('runId'), 'jobId': job.get('jobId')},
+                                        'reason': f'terminal job still holding a {kind} lease'})
+                continue
+            ref = {'runId': job.get('runId'), 'jobId': job.get('jobId')}
+            # Browser quiet is not only about leases: an attachment still being
+            # fetched or uploaded is a browser operation in flight, and closing
+            # the boundary over it would cut the operation the design says must
+            # finish first.
+            for attachment in job.get('attachments') or []:
+                state_name = str(attachment.get('state') or '')
+                if state_name in ACTIVE_ATTACHMENT_STATES:
+                    outstanding.append({**ref, 'reason': f'attachment {state_name}',
+                                        'attachmentId': attachment.get('attachmentId')})
+            kind, detail = self.classify_lease(job)
+            if kind == self.LEASE_ACTIVE:
+                outstanding.append({**ref, 'reason': 'claimed'})
+            elif kind == self.LEASE_EXPIRED:
+                outstanding.append({**ref, 'reason': 'lease expired, outcome unknown'})
+            elif kind == self.LEASE_INVALID:
+                outstanding.append({**ref, 'reason': f'invalid lease state: {detail}'})
+            elif status == 'DISPATCHING':
+                outstanding.append({**ref, 'reason': 'dispatching'})
+        return {'mode': state.get('mode'), 'drainId': state.get('drainId'),
+                'unsafe': bool(state.get('unsafe')),
+                'unsafeReasons': list(state.get('unsafeReasons') or []),
+                'outstanding': outstanding,
+                'barrierAllowed': (state.get('mode') == ROLLOUT_DRAIN
+                                   and not state.get('unsafe') and not outstanding)}
+
+    def enter_barrier(self) -> dict[str, Any]:
+        """Close the boundary, or refuse and say what is in the way.
+
+        Recovery runs here rather than being expected beforehand. A lease that
+        expired during the drain stops counting as active the moment it expires,
+        so a barrier evaluated without recovery sees a quiet queue and closes
+        over an outcome nobody recorded. Safety must not depend on the caller
+        remembering the right order.
+        """
+        self.recover_expired_leases()
+        # Across every process, not only this one's epoch.
+        self._drain_reconcile()
+        status = self.drain_status()
+        if not status['barrierAllowed']:
+            raise DeliveryError(
+                'BARRIER_REFUSED: ' + json.dumps({'unsafe': status['unsafe'],
+                                                  'unsafeReasons': status['unsafeReasons'],
+                                                  'outstanding': status['outstanding']},
+                                                 ensure_ascii=False))
+        state = self.rollout_state()
+        state['mode'] = ROLLOUT_BARRIER
+        state['enteredAt'] = utc_now()
+        self._write_rollout(state)
+        return state
+
+    def _iter_jobs(self):
+        for job, error in self._iter_jobs_strict():
+            if error is None:
+                yield job
+
+    def _iter_jobs_strict(self):
+        """Every persisted delivery job, reporting the ones that cannot be read."""
+        if not self.data_dir.is_dir():
+            return
+        for run_dir in sorted(self.data_dir.iterdir()):
+            delivery_root = run_dir / 'executor' / 'delivery'
+            if not delivery_root.is_dir():
+                continue
+            for job_dir in sorted(delivery_root.iterdir()):
+                job_file = job_dir / 'job.json'
+                if not job_file.is_file():
+                    continue
+                try:
+                    job = json.loads(job_file.read_text('utf-8'))
+                except Exception as exc:
+                    yield None, f'{job_file}: {exc}'
+                    continue
+                if not isinstance(job, dict) or not job.get('jobId'):
+                    yield None, f'{job_file}: not a delivery job'
+                    continue
+                # Only what browser quiet depends on, not the whole schema.
+                attachments = job.get('attachments', [])
+                if not isinstance(attachments, list):
+                    yield None, f'{job_file}: attachments is not a list'
+                    continue
+                if any(not isinstance(a, dict) for a in attachments):
+                    yield None, f'{job_file}: attachments contains a non-object'
+                    continue
+                if str(job.get('status') or '') in TERMINAL_JOB_STATES and any(
+                        str(a.get('state') or '') in ACTIVE_ATTACHMENT_STATES for a in attachments):
+                    # A finished job cannot still be uploading. Reading this as
+                    # quiet would take a contradiction for proof of silence.
+                    yield None, (f'{job_file}: terminal job with an attachment still in flight')
+                    continue
+                yield job, None
+
     def _lease_is_active(self, job: dict[str, Any]) -> bool:
-        token = str(job.get('claimLeaseToken') or '')
-        expires = iso_dt(job.get('claimExpiresAt'))
-        return bool(token and expires and expires > utc_now_dt())
+        """One source of truth for lease liveness.
+
+        Comparing the timestamp here as well left a second place that could meet
+        a naive value and raise a bare TypeError, and a second definition of
+        "active" that could drift from the classifier.
+        """
+        return self.classify_lease(job)[0] == self.LEASE_ACTIVE
+
+    def _require_live_lease(self, job: dict[str, Any], lease_token: str) -> None:
+        """Every non-CLAIM operation needs a live lease that this client holds.
+
+        Validation only: this leaves the job exactly as it found it. Renewal is
+        a separate act, because a caller that does not persist the job cannot
+        renew anything — `attachment_chunk` called the mutating helper and never
+        saved, so the code read as a renewal while the stored lease went on
+        expiring on its original schedule.
+
+        The old comparison matched an empty stored token against an empty
+        requested one and, finding no expiry to object to, wrote a fresh one:
+        a lease conjured out of nothing. During a drain that let unclaimed work
+        keep moving, and RELEASE could erase a contradictory trace the latch was
+        holding, opening the barrier over it.
+        """
+        kind, detail = self.classify_lease(job)
+        if kind == self.LEASE_NONE:
+            raise DeliveryError('DELIVERY_NOT_LEASED: job has no delivery lease')
+        if kind == self.LEASE_EXPIRED:
+            self._latch_if_draining_reason(
+                job, f"event on an expired lease: run={job.get('runId')} job={job.get('jobId')}")
+            raise DeliveryError('delivery lease expired')
+        if kind == self.LEASE_INVALID:
+            self._latch_if_draining_reason(
+                job, f"event on an invalid lease state: run={job.get('runId')} "
+                     f"job={job.get('jobId')}: {detail}")
+            raise DeliveryError(f'DELIVERY_LEASE_INVALID: {detail}')
+        requested = str(lease_token or '').strip()
+        if not requested or str(job.get('claimLeaseToken') or '').strip() != requested:
+            raise DeliveryError('delivery lease token mismatch')
 
     def _touch_lease(self, job: dict[str, Any], lease_token: str) -> None:
-        if str(job.get('claimLeaseToken') or '') != str(lease_token or ''):
-            raise DeliveryError('delivery lease token mismatch')
-        expires = iso_dt(job.get('claimExpiresAt'))
-        if expires is not None and expires <= utc_now_dt():
-            raise DeliveryError('delivery lease expired')
+        """Validate, then renew. The caller must persist the job afterwards.
+
+        Only delivery events take this path, and every one of them ends in
+        `save_job`. Reading attachment bytes does not: `attachment_chunk`
+        validates and reads, and the lease is renewed by the client's HEARTBEAT
+        like any other lease in the system. One renewal path, and it is a
+        persisted one.
+        """
+        self._require_live_lease(job, lease_token)
         now = utc_now()
         job['claimHeartbeatAt'] = now
         job['clientHeartbeatAt'] = now
@@ -1154,6 +1955,24 @@ class DeliveryManager:
             )
         return True
 
+    def _latch_if_draining_reason(self, job: dict[str, Any], reason: str) -> None:
+        if str(self.rollout_state().get('mode') or '') == ROLLOUT_DRAIN:
+            self.mark_unsafe(reason)
+
+    def _latch_if_draining(self, job: dict[str, Any]) -> None:
+        """A lease that expired during a drain leaves an outcome nobody knows.
+
+        Latching here rather than at barrier time is deliberate: by the time the
+        barrier is checked the lease is gone from the table, and an empty table
+        would otherwise read as proof that everything finished.
+        """
+        state = self.rollout_state()
+        if str(state.get('mode') or '') != ROLLOUT_DRAIN:
+            return
+        self.mark_unsafe(
+            f"lease expired during drain: run={job.get('runId')} job={job.get('jobId')} "
+            f"status={job.get('status')}")
+
     def recover_expired_leases(self) -> list[dict[str, Any]]:
         changed: list[dict[str, Any]] = []
         if not self.data_dir.is_dir():
@@ -1181,9 +2000,12 @@ class DeliveryManager:
                     if str(job.get('dispatchEpoch') or '') != self.dispatch_epoch:
                         continue
 
-                    token = str(job.get('claimLeaseToken') or '')
-                    expires = iso_dt(job.get('claimExpiresAt'))
-                    if not token or not expires or expires > now_dt:
+                    # Classified rather than compared directly: a naive
+                    # timestamp used to meet an aware one here and raise a bare
+                    # TypeError from inside recovery. An unclassifiable lease is
+                    # not recovered — it is left for the drain to latch.
+                    kind, _detail = self.classify_lease(job)
+                    if kind != self.LEASE_EXPIRED:
                         continue
 
                     for attachment in job.get('attachments') or []:
@@ -1198,6 +2020,10 @@ class DeliveryManager:
                             'Delivery lease expired while Send was pending; explicit Send is required'
                         )
 
+                    # Latch before the trace is cleared: afterwards the lease
+                    # is gone from the table and an empty table would read as
+                    # proof that the delivery finished.
+                    self._latch_if_draining(job)
                     self._clear_lease(job)
                     job['leaseRecoveredAt'] = utc_now()
                     self.save_job(job)
@@ -1206,54 +2032,175 @@ class DeliveryManager:
         return changed
 
     def poll_for_tab(self, tab_id: int, page_url: str) -> dict[str, Any] | None:
-        self.recover_expired_leases()
-        candidates: list[dict[str, Any]] = []
-        if not self.data_dir.is_dir():
+        mode = str(self.rollout_state().get('mode') or ROLLOUT_OPEN)
+        if mode in (ROLLOUT_DRAIN, ROLLOUT_BARRIER):
+            # No new work is handed out and no new claim may be taken. Events
+            # for work already claimed still arrive through update_from_client,
+            # which is what lets a claimed delivery finish rather than being
+            # abandoned mid-flight.
+            self.recover_expired_leases()
             return None
-        for run_dir in self.data_dir.iterdir():
-            if not run_dir.is_dir():
-                continue
-            delivery_root = run_dir / 'executor' / 'delivery'
-            if not delivery_root.is_dir():
-                continue
-            for path in delivery_root.iterdir():
-                job_file = path / 'job.json'
-                if not job_file.is_file():
-                    continue
-                job = self._load_json(job_file, {})
-                if not isinstance(job, dict):
-                    continue
-                target = job.get('target') if isinstance(job.get('target'), dict) else {}
-                if int(target.get('tabId') or -1) != int(tab_id):
-                    continue
-                target_url = str(target.get('url') or '')
-                if target_url and page_url and target_url.split('#', 1)[0] != page_url.split('#', 1)[0]:
-                    continue
-                if str(job.get('status') or '') in TERMINAL_JOB_STATES | {PAUSED_JOB_STATE}:
-                    continue
-                if str(job.get('dispatchEpoch') or '') != self.dispatch_epoch:
-                    continue
-                if self._lease_is_active(job):
-                    continue
-                candidates.append(job)
+        # Recovery and the decision are one critical section. They classify the
+        # same leases from two separate clock readings, so anything that can
+        # change between them changes the answer: a claim taken by another
+        # request after the gate has passed would put a second delivery into
+        # the tab the gate had just found free.
+        with self.lock:
+            self.recover_expired_leases()
+            if not self.data_dir.is_dir():
+                return None
+            # One delivery per tab at a time. A newer job is created while an
+            # older one is claimed — the ordinary case now that the older one
+            # is no longer superseded out from under its lease — and handing
+            # the newer one out would put two deliveries into the same tab,
+            # with the outcome of the first still owed.
+            if self.outstanding_lease_for_tab(tab_id) is not None:
+                return None
+            # The supersede that `create_job` had to skip is a postponement,
+            # not a cancellation. It runs once, while the newer job is being
+            # written, and at that moment the older one is protected by its
+            # lease — so nothing retires it and nothing used to come back to
+            # it. The older delivery then waited behind the newer one and
+            # became eligible again the moment the newer one was sent: a chat
+            # received the superseded content after the current content.
+            #
+            # Here is where the postponement is redeemed. The gate above has
+            # just proved every job of this tab is at NO_LEASE, so the safety
+            # rule and the retirement do not overlap: nothing with an
+            # outstanding outcome can be retired from this call.
+            self._retire_superseded_for_tab(tab_id)
+            return self._select_job_for_tab(tab_id, page_url)
 
-        # The newest explicit Prepare wins. Old failed/stalled jobs must not
-        # starve every later delivery job for the same browser tab.
-        candidates.sort(key=lambda x: str(x.get('createdAt') or ''), reverse=True)
-        return candidates[0] if candidates else None
+    def prepare_order_for_tab(self, tab_id: int) -> tuple[list[dict[str, Any]] | None, str]:
+        """This tab's open deliveries, newest Prepare first — or a refusal.
+
+        Both decisions that rest on Prepare order come through here, because
+        the order was being taken from `createdAt` compared as a string. That
+        is the time invariant broken in the one place where breaking it is not
+        a misordering: `SUPERSEDED` is terminal, and a malformed value sorts
+        above every real ISO timestamp, so the stale job became the keeper and
+        the genuinely newer delivery was destroyed.
+
+        Refusal is a value with a reason. Three cases produce it, and each is
+        UNKNOWN rather than absent:
+
+          - a job that cannot be read at all;
+          - a `createdAt` that is missing, malformed or naive;
+          - two newest jobs sharing an instant, which is provable time that
+            still establishes no order. Falling back on `Path.iterdir` order
+            would make the filesystem the arbiter of which delivery survives.
+
+        A refusal stops the tab until an operator resolves it. That is the same
+        answer an unexplained lease already gets, and it is recoverable: repair
+        the stored value and the next poll proceeds.
+        """
+        rows: list[tuple[datetime, dict[str, Any]]] = []
+        for job, error in self._iter_jobs_strict():
+            if error is not None:
+                return None, f'unreadable delivery job: {error}'
+            verdict, why = self.classify_target(job, tab_id=tab_id)
+            if verdict == self.TARGET_UNPROVABLE:
+                return None, (f"target cannot be read: run={job.get('runId')} "
+                              f"job={job.get('jobId')}: {why}")
+            if verdict == self.TARGET_OTHER:
+                continue
+            if str(job.get('status') or '') in TERMINAL_JOB_STATES | {PAUSED_JOB_STATE}:
+                continue
+            created = decision_dt(job.get('createdAt'))
+            if created is None:
+                return None, (f"createdAt is not a timezone-aware timestamp: "
+                              f"run={job.get('runId')} job={job.get('jobId')} "
+                              f"value={job.get('createdAt')!r}")
+            rows.append((created, job))
+        rows.sort(key=lambda row: row[0], reverse=True)
+        if len(rows) > 1 and rows[0][0] == rows[1][0]:
+            return None, (f"two Prepares share the newest createdAt "
+                          f"({rows[0][0].isoformat()}), so no newest can be proven")
+        return [job for _created, job in rows], ''
+
+    def _retire_superseded_for_tab(self, tab_id: int) -> int:
+        """Retire everything this tab has queued except the newest Prepare.
+
+        Reached only after the gate has proved the tab holds no lease, and it
+        goes through `supersede_older_jobs_for_tab` rather than writing the
+        status itself, so the lease classification is applied a second time by
+        the same code. A trace that appears between the two checks stops the
+        retirement exactly as it stops a fresh one.
+        """
+        order, _reason = self.prepare_order_for_tab(tab_id)
+        if not order:
+            # Refused, or nothing open. Either way nothing is retired: a
+            # terminal write on unprovable evidence is the defect, not the fix.
+            return 0
+        newest = order[0]
+        return self.supersede_older_jobs_for_tab(
+            tab_id, str(newest.get('runId') or ''), str(newest.get('jobId') or ''))
+
+    def _select_job_for_tab(self, tab_id: int, page_url: str) -> dict[str, Any] | None:
+        """The newest job for this tab that owes nothing and is owed nothing.
+
+        The order comes from `prepare_order_for_tab`, which proves it, so a
+        Prepare order that cannot be established hands out nothing rather than
+        the job that happens to sort first. String comparison of `createdAt`
+        used to decide this too, and the same malformed value that made a stale
+        job the keeper also made it the offer.
+
+        Only NO_LEASE is eligible. This repeats the gate above deliberately:
+        the gate answers about the tab, this answers about the job, and a state
+        that reaches here with any lease trace at all — including one that
+        expired between the two — is an outcome nobody has recorded.
+        """
+        order, _reason = self.prepare_order_for_tab(tab_id)
+        if not order:
+            return None
+        for job in order:                       # newest proven Prepare first
+            target = job.get('target') if isinstance(job.get('target'), dict) else {}
+            target_url = str(target.get('url') or '')
+            if target_url and page_url and target_url.split('#', 1)[0] != page_url.split('#', 1)[0]:
+                continue
+            if str(job.get('dispatchEpoch') or '') != self.dispatch_epoch:
+                continue
+            kind, _detail = self.classify_lease(job)
+            if kind != self.LEASE_NONE:
+                # ACTIVE: someone is performing it. EXPIRED: it has not been
+                # through recovery in this pass, so its outcome is unknown
+                # rather than absent. INVALID: contradictory evidence needs an
+                # operator, not another client — offering the job would only
+                # produce a claim refused for the same reason.
+                continue
+            return job
+        return None
 
     def update_from_client(self, run_id: str, job_id: str, body: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
             job = self.get_job(run_id, job_id)
 
+            # Authorization first, idempotence second. The terminal early return
+            # used to stand above this check, so an endpoint could name any
+            # finished delivery of any other tab and be answered 200 with the
+            # job body — the caller's own tab was never established. A terminal
+            # state is a reason to do nothing, not a reason to skip asking who
+            # is calling.
+            #
+            # The stored target is read by the one classifier, not by `int()`
+            # here. `int(True)` is 1, so a corrupted tabId used to answer as a
+            # perfectly good tab number and hand the job to it, and `int('bad')`
+            # left through an exception instead of a refusal.
+            self._require_target_tab(job, body.get('tabId'))
+
             if str(job.get('status') or '') in TERMINAL_JOB_STATES | {PAUSED_JOB_STATE}:
                 return job
 
-            target = job.get('target') if isinstance(job.get('target'), dict) else {}
-            if int(body.get('tabId') or -1) != int(target.get('tabId') or -2):
-                raise DeliveryError('wrong tabId for delivery job')
-
             event_type = str(body.get('event') or '')
+            if event_type == 'CLAIM':
+                # A new claim is new work. Refusing it only in poll_for_tab left
+                # the event route as a way to take one anyway, which is how a
+                # drain could still be handed fresh outstanding deliveries after
+                # it started. Checked before any job-specific validation, so an
+                # unrelated complaint cannot answer in its place.
+                mode = str(self.rollout_state().get('mode') or ROLLOUT_OPEN)
+                if mode != ROLLOUT_OPEN:
+                    raise DeliveryError(f'DELIVERY_CLAIM_REFUSED: rollout mode is {mode}')
             now = utc_now()
 
             if event_type == 'CLAIM':
@@ -1262,8 +2209,24 @@ class DeliveryManager:
                     raise DeliveryError('missing delivery lease token')
 
                 current_token = str(job.get('claimLeaseToken') or '')
-                if self._lease_is_active(job) and current_token != requested_token:
+                kind, detail = self.classify_lease(job)
+                if kind == self.LEASE_ACTIVE and current_token != requested_token:
                     raise DeliveryError('delivery job is already leased')
+                if kind == self.LEASE_INVALID:
+                    # A fresh claim must not paper over a trace nobody could
+                    # explain: overwriting it would destroy the only record that
+                    # an outcome was lost.
+                    raise DeliveryError(f'DELIVERY_LEASE_INVALID: {detail}')
+                if kind == self.LEASE_EXPIRED:
+                    # Recovery must run first. poll_for_tab does it before
+                    # offering work, but a direct event call would otherwise
+                    # overwrite the expired trace and the lease term would stop
+                    # being a server-side boundary.
+                    self._latch_if_draining_reason(
+                        job, f"claim over an expired lease: run={job.get('runId')} "
+                             f"job={job.get('jobId')}")
+                    raise DeliveryError(
+                        'DELIVERY_LEASE_EXPIRED: recover the expired lease before claiming')
 
                 job['claimLeaseToken'] = requested_token
                 job['claimHeartbeatAt'] = now
@@ -1315,6 +2278,13 @@ class DeliveryManager:
                 job['sendError'] = body.get('error')
                 if job['sendState'] == 'SENT':
                     job['sentAt'] = now
+                    # The outcome is known, so the lease ends here, in the same
+                    # save. The browser sends RELEASE afterwards, but by then
+                    # the job is terminal and the early return ignores it — so
+                    # a perfectly ordinary successful send used to leave an
+                    # ACTIVE lease behind for ever, and the drain read that
+                    # terminal job as quiet.
+                    self._clear_lease(job)
 
             elif event_type == 'ATTACHMENT_STATE':
                 attachment_id = str(body.get('attachmentId') or '')
@@ -1427,8 +2397,28 @@ class DeliveryManager:
             job['sendError'] = None
             return self.save_job(job)
 
-    def attachment_chunk(self, run_id: str, job_id: str, attachment_id: str, offset: int, limit: int) -> dict[str, Any]:
+    def attachment_chunk(self, run_id: str, job_id: str, attachment_id: str, offset: int, limit: int,
+                         *, tab_id: int, lease_token: str) -> dict[str, Any]:
+        """Attachment bytes, to the tab that holds the lease and to nobody else.
+
+        Both proofs are required arguments. They used to default to None and
+        the empty string, with the whole check inside `if tab_id is not None`,
+        so a caller that named neither was handed the bytes. The obligation
+        held only because the single HTTP route happened to pass them — an
+        obligation that depends on the caller getting it right is not one, and
+        the next caller is where it stops holding.
+        """
         job = self.get_job(run_id, job_id)
+        self._require_target_tab(job, tab_id)
+        # A live lease held by this caller. Reading bytes is work, and work
+        # requires a claim — otherwise a drain that hands out no new jobs
+        # still hands out new pieces of them.
+        #
+        # Validation only. This method does not save the job, so the mutating
+        # helper it used to call renewed the lease in a dict that was then
+        # dropped: an operation that looked like a heartbeat and kept nothing.
+        # The client renews through HEARTBEAT, which is persisted.
+        self._require_live_lease(job, lease_token)
         attachment = next((x for x in job.get('attachments') or [] if x.get('attachmentId') == attachment_id), None)
         if attachment is None:
             raise DeliveryError('attachment not found')

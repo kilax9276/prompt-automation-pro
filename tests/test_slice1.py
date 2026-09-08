@@ -448,13 +448,29 @@ class Slice1Acceptance(unittest.TestCase):
         ctx = console.profile_context.authorize_execution(run_id)
         self.assertEqual(ctx["resolutionStatus"], "RESOLVED")
 
-    def test_missing_context_is_fail_closed_and_never_masked_as_identity_failure(self):
-        """Creator condition 2 and the promotion window."""
-        run_id = "20260906T101010.000000Z_window"
+    def test_incomplete_persisted_run_is_fail_closed_and_not_an_identity_failure(self):
+        """Creator condition 2, on a Run the writer made and damage removed.
+
+        This used to be an empty directory called a promotion window. The
+        receiver publishes by renaming a staging directory that already
+        contains result.json, so a published Run without one is not a window
+        anyone can observe — it is a damaged Run. The fixture now says that:
+        a canonical Run from the receiver, with exactly result.json removed.
+        """
+        h = ReceiverHarness(self.root)
+        try:
+            # A conversation of its own: the second half of this test posts
+            # another Run, and intake dedupe would otherwise collapse the two.
+            _, created = h.post_json(
+                "/api/chat-result",
+                self.payload(conversation="c-incomplete", generated="t-incomplete"))
+            run_id = created["runId"]
+        finally:
+            h.close()
         run_dir = self.data / run_id
-        run_dir.mkdir(parents=True)
-        # A Run directory that exists but carries no result.json yet is the
-        # window between receiver promotion and a usable context.
+        result = run_dir / "result.json"
+        self.assertTrue(result.is_file(), "the receiver publishes a Run that has its result")
+        result.unlink()                                   # exactly the file under test
         console = ConsoleServer(self.root, self.data, self.token_file)
         read = console.profile_context.get(run_id)
         self.assertEqual(read["resolutionStatus"], "RUN_CONTEXT_NOT_READY")
@@ -524,10 +540,20 @@ class Slice1Acceptance(unittest.TestCase):
         console.executor.execute_step.assert_not_awaited()
         self.assertFalse(console.executor.state_path(run_id).exists())
 
-    def test_execute_step_in_promotion_window_changes_no_step_state(self):
-        """api_execute_step arriving before the context is usable must not run."""
-        run_id = "20260906T111111.000000Z_window"
-        (self.data / run_id).mkdir(parents=True)
+    def test_execute_step_on_an_incomplete_run_changes_no_step_state(self):
+        """api_execute_step must not run while the context cannot be built.
+
+        Same fixture correction as above: a Run the receiver actually published,
+        with result.json removed, rather than a bare directory the product
+        never produces.
+        """
+        h = ReceiverHarness(self.root)
+        try:
+            _, created = h.post_json("/api/chat-result", self.payload(generated="t-incomplete-exec"))
+            run_id = created["runId"]
+        finally:
+            h.close()
+        (self.data / run_id / "result.json").unlink()      # exactly the file under test
         console = ConsoleServer(self.root, self.data, self.token_file)
         console.executor.execute_step = AsyncMock(return_value={"unexpected": True})
 

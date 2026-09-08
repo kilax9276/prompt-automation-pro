@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -13,6 +13,27 @@ from urllib.parse import urlparse
 from profile_store import atomic_write_json
 
 ONLINE_GRACE_SECONDS = 6
+
+# Endpoint lifecycle. CLOSED and EXPIRED are terminal for a particular
+# endpointId: a heartbeat can race a close event and arrive after it, and
+# reviving the endpoint would hand a delivery to a tab that no longer exists.
+# A tab that comes back must arrive with a new endpointId.
+STATE_ONLINE = "ONLINE"
+STATE_OFFLINE = "OFFLINE"
+STATE_CLOSED = "CLOSED"
+STATE_EXPIRED = "EXPIRED"
+TERMINAL_STATES = frozenset({STATE_CLOSED, STATE_EXPIRED})
+
+# Ownership lease. 90 seconds is a term of ownership, not a promise that the
+# agent will be heard from that often.
+CONTROL_LEASE_SECONDS = 90
+
+# Registry schema. Slice-1 rows are keyed by tabId and carry no endpointId or
+# browserEpoch, and that identity cannot be reconstructed — a tab number says
+# nothing about which endpoint it was. So the old endpoint space is not
+# migrated, it is invalidated at the atomic boundary and rebuilt by the
+# extension's first reconciliation.
+REGISTRY_SCHEMA_VERSION = 2
 
 
 class EndpointError(ValueError):
@@ -25,6 +46,10 @@ def utc_now() -> datetime:
 
 def utc_iso(value: datetime | None = None) -> str:
     return (value or utc_now()).isoformat().replace("+00:00", "Z")
+
+
+def iso_after(seconds: int) -> str:
+    return utc_iso(utc_now() + timedelta(seconds=seconds))
 
 
 def parse_utc(value: str) -> datetime | None:
@@ -76,68 +101,214 @@ class EndpointRegistry:
         self.path = self.runtime_root / "browser-endpoints.json"
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
-            atomic_write_json(self.path, {"schemaVersion": 1, "endpoints": [], "pins": {}}, mode=0o640)
+            atomic_write_json(self.path, self._empty_registry(), mode=0o640)
+
+    @staticmethod
+    def _empty_registry() -> dict[str, Any]:
+        return {"schemaVersion": REGISTRY_SCHEMA_VERSION, "endpoints": [], "control": {}}
+
+    def invalidate_legacy_registry(self, backup_dir: Path | None = None) -> dict[str, Any]:
+        """Replace a slice-1 endpoint space with an empty slice-2 one.
+
+        Called by the rollout inside BARRIER, never lazily. The old file is kept
+        as rollback evidence rather than deleted: it is the only record of what
+        the browser looked like before the boundary, and rollback needs it.
+        """
+        if not self.path.is_file():
+            atomic_write_json(self.path, self._empty_registry(), mode=0o640)
+            return {"migrated": False, "reason": "absent", "backup": None}
+        # The backup is rollback evidence, so it keeps the original bytes
+        # rather than a re-serialised copy: rollback must be able to restore
+        # exactly what was there, not something merely equivalent.
+        raw_bytes = self.path.read_bytes()
+        try:
+            body = json.loads(raw_bytes.decode("utf-8"))
+        except Exception:
+            body = {}
+        version = body.get("schemaVersion") if isinstance(body, dict) else None
+        if version == REGISTRY_SCHEMA_VERSION:
+            return {"migrated": False, "reason": "already-current", "backup": None}
+        if version != 1:
+            # Only a proven slice-1 registry is invalidated. A corrupt or
+            # unknown file is not silently replaced by a clean one: that would
+            # destroy the only evidence of what went wrong.
+            raise EndpointError(
+                f"REGISTRY_INVALID: refusing to invalidate a registry of unknown "
+                f"schemaVersion {version!r}")
+        backup = None
+        target_dir = backup_dir or self.runtime_root
+        backup = target_dir / f"browser-endpoints.schema{version}.{utc_iso().replace(':', '').replace('-', '')}.json"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup.write_bytes(raw_bytes)
+        atomic_write_json(self.path, self._empty_registry(), mode=0o640)
+        return {"migrated": True, "fromSchemaVersion": version,
+                "discardedEndpoints": len(body.get("endpoints") or []),
+                "discardedPins": len(body.get("pins") or {}),
+                "backup": str(backup)}
 
     def _load(self) -> dict[str, Any]:
+        # Fail closed on damage as well as on version. Turning an unreadable
+        # file into a clean empty registry is the opposite of the boundary just
+        # introduced: a known foreign schema would be refused while a corrupt
+        # file would be accepted and quietly reset.
         try:
-            body = json.loads(self.path.read_text("utf-8"))
-        except Exception:
-            body = {"schemaVersion": 1, "endpoints": [], "pins": {}}
+            raw = self.path.read_text("utf-8")
+        except FileNotFoundError:
+            atomic_write_json(self.path, self._empty_registry(), mode=0o640)
+            raw = self.path.read_text("utf-8")
+        try:
+            body = json.loads(raw)
+        except Exception as exc:
+            raise EndpointError(f"REGISTRY_INVALID: endpoint registry is not valid JSON: {exc}")
         if not isinstance(body, dict):
-            body = {"schemaVersion": 1, "endpoints": [], "pins": {}}
-        body.setdefault("schemaVersion", 1)
-        body.setdefault("endpoints", [])
-        body.setdefault("pins", {})
-        if not isinstance(body["endpoints"], list):
-            body["endpoints"] = []
-        if not isinstance(body["pins"], dict):
-            body["pins"] = {}
+            raise EndpointError("REGISTRY_INVALID: endpoint registry root is not an object")
+        if "schemaVersion" not in body:
+            raise EndpointError("REGISTRY_INVALID: endpoint registry has no schemaVersion")
+        version = body["schemaVersion"]
+        # No coercion. int("2") and int(2.9) both yield 2, which would let a
+        # file that is not schema 2 pass a boundary whose whole purpose is to
+        # tell schemas apart.
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise EndpointError(
+                f"REGISTRY_INVALID: schemaVersion must be an integer, got {version!r}")
+        if version != REGISTRY_SCHEMA_VERSION:
+            # Fail closed. Reading slice-1 rows as slice-2 rows produced ghost
+            # endpoints with no identity that selection could still pick up.
+            # Trusting the rollout to have replaced the file is not enough: a
+            # guarantee nobody checks is the kind that fails quietly.
+            raise EndpointError(
+                f"REGISTRY_MIGRATION_REQUIRED: endpoint registry is schemaVersion "
+                f"{version}, expected {REGISTRY_SCHEMA_VERSION}")
+        # Selection policy left the registry; a stray pins block from an older
+        # file is not carried forward.
+        body.pop("pins", None)
+        self._validate_registry(body)
         return body
+
+    @staticmethod
+    def _validate_registry(body: dict[str, Any]) -> None:
+        """Refuse damage inside a schema-2 file as firmly as a foreign schema.
+
+        Coercing a broken field back to a default is the same fail-open the
+        version check was introduced to remove: an endpoint row without
+        endpointId or browserEpoch cannot exist in schema 2, and quietly
+        turning it into an identity-less ghost is how such a row reached
+        selection in the first place.
+
+        Unknown extra fields are tolerated on purpose — a schema that breaks on
+        every added field is one nobody dares extend.
+        """
+        def bad(msg: str) -> None:
+            raise EndpointError(f"REGISTRY_INVALID: {msg}")
+
+        def require_ts(container: dict[str, Any], field: str, where: str) -> None:
+            """A timestamp must be present and carry an offset.
+
+            A naive timestamp parses happily and then meets utc_now() further
+            down, where comparing it raises a bare TypeError from inside
+            unrelated code. Refusing it here turns a crash into a stated reason.
+            """
+            value = container.get(field)
+            if not isinstance(value, str) or not value.strip():
+                bad(f"{where}.{field} must be a timestamp")
+            parsed = parse_utc(value)
+            if parsed is None:
+                bad(f"{where}.{field} is not a valid timestamp: {value!r}")
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                bad(f"{where}.{field} must carry a timezone offset: {value!r}")
+
+        if not isinstance(body.get("endpoints"), list):
+            bad("endpoints must be a list")
+        if not isinstance(body.get("control"), dict):
+            bad("control must be an object")
+
+        seen: set[str] = set()
+        for idx, row in enumerate(body["endpoints"]):
+            where = f"endpoints[{idx}]"
+            if not isinstance(row, dict):
+                bad(f"{where} must be an object")
+            for field in ("endpointId", "browserEpoch", "chatType", "conversationId"):
+                value = row.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    bad(f"{where}.{field} must be a non-empty string")
+            tab = row.get("tabId")
+            if isinstance(tab, bool) or not isinstance(tab, int) or tab < 0:
+                bad(f"{where}.tabId must be a non-negative integer")
+            state = row.get("state")
+            if state not in (STATE_ONLINE, STATE_OFFLINE, STATE_CLOSED, STATE_EXPIRED):
+                bad(f"{where}.state is not a known endpoint state: {state!r}")
+            require_ts(row, "firstSeenAt", where)
+            require_ts(row, "lastSeenAt", where)
+            if state in TERMINAL_STATES:
+                # Slice-2 code always stamps this when it terminates an
+                # endpoint, so its absence means the row was not written by it.
+                require_ts(row, "terminatedAt", where)
+            key = row["endpointId"].strip()
+            if key in seen:
+                bad(f"duplicate endpointId {key!r}")
+            seen.add(key)
+
+        control = body["control"]
+        if control:
+            epoch = control.get("browserEpoch")
+            if not isinstance(epoch, str) or not epoch.strip():
+                bad("control.browserEpoch must be a non-empty string")
+            for field in ("acquiredAt", "lastSeenAt", "leaseUntil"):
+                require_ts(control, field, "control")
 
     def _save(self, body: dict[str, Any]) -> None:
         atomic_write_json(self.path, body, mode=0o640)
 
-    def observe(self, tab_id: int, page: str, endpoint_id: str | None = None, title: str | None = None) -> dict[str, Any]:
+    def observe(self, tab_id: int, page: str, endpoint_id: str | None = None,
+                title: str | None = None, browser_epoch: str | None = None,
+                chat_type: str | None = None, conversation_id: str | None = None,
+                project_id: str | None = None) -> dict[str, Any]:
+        """Record what the browser reports about one endpoint. Facts only.
+
+        Keyed by endpointId rather than tabId: a tab number is reused by the
+        browser, so keying by it lets a new tab inherit the identity of a dead
+        one. The endpointId is minted by the extension and survives a page
+        reload within the same epoch, which is what makes a reload keep its
+        delivery target instead of silently acquiring a new one.
+
+        No policy is stored here — no binding, no approval, no staleness. The
+        registry answers "what does the browser look like", and selection
+        answers "what may be used". Mixing the two is how a stale approval
+        became indistinguishable from an absent tab.
+        """
         tab_id = int(tab_id)
         if tab_id < 0:
             raise EndpointError("invalid tabId")
-        inferred = infer_from_page(page)
+        endpoint_key = str(endpoint_id).strip() if endpoint_id else None
+        if not endpoint_key:
+            raise EndpointError("endpointId is required")
+        epoch = str(browser_epoch).strip() if browser_epoch else None
+        if not epoch:
+            raise EndpointError("browserEpoch is required")
+        # The browser states its identity; the URL is kept as a launch hint
+        # only. Deriving identity from the URL is what let a reload or a
+        # redirect quietly change which chat an endpoint claimed to be.
+        stated = {
+            "chatType": str(chat_type).strip() if chat_type else None,
+            "conversationId": str(conversation_id).strip() if conversation_id else None,
+            "projectId": str(project_id).strip() if project_id else None,
+        }
+        if not stated["chatType"] or not stated["conversationId"]:
+            raise EndpointError("chatType and conversationId are required")
         now = utc_iso()
         body = self._load()
         rows = list(body.get("endpoints") or [])
-        existing = next((x for x in rows if int(x.get("tabId", -999999)) == tab_id), None)
+        existing = next((x for x in rows if str(x.get("endpointId") or "") == endpoint_key), None)
+
+        if existing and str(existing.get("state") or "") in TERMINAL_STATES:
+            # A late pulse for an endpoint that is already CLOSED or EXPIRED.
+            # There is no transition back: returning the row unchanged keeps the
+            # race harmless without pretending the tab is alive.
+            return self._decorate(dict(existing))
+        if existing and str(existing.get("browserEpoch") or "") != epoch:
+            raise EndpointError("endpointId belongs to another browserEpoch")
         previous_seen = parse_utc(str((existing or {}).get("lastSeenAt") or ""))
         continuity_broken = bool(previous_seen and (utc_now() - previous_seen).total_seconds() > ONLINE_GRACE_SECONDS)
-        # A runtime pin is only valid while the observed tab remains the same
-        # conversation. This check is independent of the heartbeat grace so a
-        # fast Chrome restart/tabId reuse cannot redirect a pin to another chat.
-        for binding_id, pin in list((body.get("pins") or {}).items()):
-            pin_tab = pin.get("tabId") if isinstance(pin, dict) else pin
-            try:
-                same_tab = int(pin_tab) == tab_id
-            except Exception:
-                same_tab = False
-            if not same_tab:
-                continue
-            if not isinstance(pin, dict):
-                pin = {"tabId": tab_id}
-            pin = dict(pin)
-            identity_changed = bool(
-                (pin.get("chatType") and str(pin.get("chatType")) != str(inferred.get("chatType") or ""))
-                or (pin.get("conversationId") and str(pin.get("conversationId")) != str(inferred.get("conversationId") or ""))
-                or (pin.get("endpointId") and endpoint_id and str(pin.get("endpointId")) != str(endpoint_id))
-            )
-            # Only a changed conversation invalidates a pin. A heartbeat gap
-            # means the very same chat went away and came back: delivery is
-            # still addressed to the right conversation, so it resumes on its
-            # own. Requiring an operator click there stopped real work for no
-            # safety gain, while tabId reuse is caught by the identity check
-            # regardless of how long the tab was silent.
-            if identity_changed:
-                pin["stale"] = True
-                pin["staleReason"] = "tab identity changed; delivery is paused until this is resolved"
-                pin["staleAt"] = now
-                body.setdefault("pins", {})[binding_id] = pin
         # Disconnect telemetry: observation only, never an authorization gate.
         history = [str(x) for x in ((existing or {}).get("disconnects") or []) if x]
         if continuity_broken:
@@ -153,11 +324,14 @@ class EndpointRegistry:
             "lastDisconnectAt": history[-1] if history else (existing or {}).get("lastDisconnectAt"),
             "lastGapSeconds": gap_seconds if gap_seconds is not None else (existing or {}).get("lastGapSeconds"),
             "tabId": tab_id,
-            "endpointId": str(endpoint_id).strip() if endpoint_id else None,
-            "chatType": inferred["chatType"],
-            "conversationId": inferred["conversationId"],
-            "projectId": inferred["projectId"],
-            "url": inferred["url"],
+            "endpointId": endpoint_key,
+            "browserEpoch": epoch,
+            "state": STATE_ONLINE,
+            "chatType": stated["chatType"],
+            "conversationId": stated["conversationId"],
+            "projectId": stated["projectId"],
+            # Stored, never used to decide identity.
+            "url": str(page or "") or None,
             "title": str(title).strip() if title else (existing or {}).get("title"),
             "firstSeenAt": (existing or {}).get("firstSeenAt") if not continuity_broken else now,
             "lastSeenAt": now,
@@ -166,30 +340,186 @@ class EndpointRegistry:
             row["firstSeenAt"] = now
         replaced = False
         for idx, item in enumerate(rows):
-            if int(item.get("tabId", -999999)) == tab_id:
+            if str(item.get("endpointId") or "") == endpoint_key:
                 rows[idx] = row
                 replaced = True
                 break
         if not replaced:
             rows.append(row)
-        rows.sort(key=lambda x: int(x.get("tabId") or 0))
+        rows.sort(key=lambda x: str(x.get("endpointId") or ""))
         body["endpoints"] = rows
         self._save(body)
         return self._decorate(row)
 
+
+    # ---- control ownership ------------------------------------------------
+    #
+    # One control agent per browser epoch, held by a lease. Showing a conflict
+    # is not enough: if both epochs receive a reconciliation plan we merely
+    # observe the conflict and still end up with two competing reconcilers, so
+    # the loser gets no plan and changes nothing.
+    #
+    # Ownership follows a real change of owner, not any lease gap: an epoch
+    # that reappears before anyone took over reacquires its own endpoints
+    # rather than minting new identities for them.
+
+    def control_state(self) -> dict[str, Any]:
+        body = self._load()
+        control = body.get("control") if isinstance(body.get("control"), dict) else {}
+        until = parse_utc(str(control.get("leaseUntil") or ""))
+        return {"browserEpoch": control.get("browserEpoch"),
+                "acquiredAt": control.get("acquiredAt"),
+                "lastSeenAt": control.get("lastSeenAt"),
+                "leaseUntil": control.get("leaseUntil"),
+                "leaseLive": bool(until and until > utc_now())}
+
+    def acquire_control(self, browser_epoch: str) -> dict[str, Any]:
+        """Acquire, renew or refuse control for an epoch.
+
+        Refusal is a value, not an exception: the caller must be able to answer
+        CONTROL_AGENT_CONFLICT without the refusal itself having written
+        anything.
+
+        Takeover is a single write. Marking the new owner first and expiring the
+        previous endpoints second leaves, if the process dies between them, a
+        new owner holding live endpoints of an epoch that no longer exists.
+        """
+        epoch = str(browser_epoch or "").strip()
+        if not epoch:
+            raise EndpointError("browserEpoch is required")
+        body = self._load()
+        control = body.get("control") if isinstance(body.get("control"), dict) else {}
+        current = str(control.get("browserEpoch") or "")
+        until = parse_utc(str(control.get("leaseUntil") or ""))
+        now = utc_now()
+        lease_live = bool(until and until > now)
+
+        if current and current != epoch and lease_live:
+            return {"owner": False, "conflict": True, "browserEpoch": epoch,
+                    "heldBy": current, "leaseUntil": control.get("leaseUntil"),
+                    "transferred": False, "expiredEndpoints": []}
+
+        now_iso = utc_iso()
+        lease_until = iso_after(CONTROL_LEASE_SECONDS)
+        takeover = bool(current and current != epoch)
+        rows = list(body.get("endpoints") or [])
+        expired: list[str] = []
+        if takeover:
+            for idx, item in enumerate(rows):
+                if str(item.get("browserEpoch") or "") == epoch:
+                    continue
+                if str(item.get("state") or "") in TERMINAL_STATES:
+                    continue
+                row = dict(item)
+                row["state"] = STATE_EXPIRED
+                row["terminatedAt"] = now_iso
+                rows[idx] = row
+                expired.append(str(row.get("endpointId") or ""))
+            body["endpoints"] = rows
+
+        body["control"] = {
+            "browserEpoch": epoch,
+            "acquiredAt": now_iso if (takeover or not current) else (control.get("acquiredAt") or now_iso),
+            "lastSeenAt": now_iso,
+            "leaseUntil": lease_until,
+        }
+        # One save: owner and expiries commit together or not at all.
+        self._save(body)
+        return {"owner": True, "conflict": False, "browserEpoch": epoch,
+                "leaseUntil": lease_until, "transferred": takeover,
+                "reacquired": bool(current == epoch and not lease_live),
+                "expiredEndpoints": expired}
+
+    def control_check(self, browser_epoch: str) -> dict[str, Any]:
+        """Answer whether this epoch may act, without writing anything."""
+        epoch = str(browser_epoch or "").strip()
+        state = self.control_state()
+        current = str(state.get("browserEpoch") or "")
+        if not epoch or not current:
+            return {"owner": False, "conflict": False}
+        if current == epoch:
+            return {"owner": bool(state["leaseLive"]), "conflict": False}
+        # A foreign epoch while the owner's lease is alive is a conflict, not a
+        # plain "not owner": the two answers point the operator at different
+        # problems.
+        return {"owner": False, "conflict": bool(state["leaseLive"]), "heldBy": current}
+
     def _decorate(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Derive presence from the last heartbeat. Terminal states never move."""
         out = dict(row)
         seen = parse_utc(str(row.get("lastSeenAt") or ""))
         age = (utc_now() - seen).total_seconds() if seen else 10**9
-        out["online"] = age <= ONLINE_GRACE_SECONDS
+        stored = str(row.get("state") or "")
+        if stored in TERMINAL_STATES:
+            out["state"] = stored
+        else:
+            out["state"] = STATE_ONLINE if age <= ONLINE_GRACE_SECONDS else STATE_OFFLINE
+        out["online"] = out["state"] == STATE_ONLINE
         out["ageSeconds"] = max(0.0, age) if age < 10**8 else None
         return out
 
+    def close(self, endpoint_id: str, browser_epoch: str) -> dict[str, Any]:
+        """The tab is gone. Terminal, and only for its own epoch."""
+        return self._terminate(endpoint_id, browser_epoch, STATE_CLOSED)
+
+    def expire_epoch(self, browser_epoch: str) -> list[str]:
+        """A new browser epoch strands every endpoint of the previous one.
+
+        Expiry follows a real change of owner, not any lease gap: a flapping
+        lease under the same owner must not force new identities, because that
+        would rebuild delivery targets for no reason.
+        """
+        body = self._load()
+        rows = list(body.get("endpoints") or [])
+        expired = []
+        for idx, item in enumerate(rows):
+            if str(item.get("browserEpoch") or "") == str(browser_epoch):
+                continue
+            if str(item.get("state") or "") in TERMINAL_STATES:
+                continue
+            row = dict(item)
+            row["state"] = STATE_EXPIRED
+            row["terminatedAt"] = utc_iso()
+            rows[idx] = row
+            expired.append(str(row.get("endpointId") or ""))
+        if expired:
+            body["endpoints"] = rows
+            self._save(body)
+        return expired
+
+    def _terminate(self, endpoint_id: str, browser_epoch: str, state: str) -> dict[str, Any]:
+        key = str(endpoint_id).strip()
+        body = self._load()
+        rows = list(body.get("endpoints") or [])
+        for idx, item in enumerate(rows):
+            if str(item.get("endpointId") or "") != key:
+                continue
+            if str(item.get("browserEpoch") or "") != str(browser_epoch):
+                raise EndpointError("endpointId belongs to another browserEpoch")
+            row = dict(item)
+            if str(row.get("state") or "") in TERMINAL_STATES:
+                return self._decorate(row)
+            row["state"] = state
+            row["terminatedAt"] = utc_iso()
+            rows[idx] = row
+            body["endpoints"] = rows
+            self._save(body)
+            return self._decorate(row)
+        raise EndpointError("endpoint not found")
+
     def list(self) -> dict[str, Any]:
+        """Observed browser state only.
+
+        Selection policy is not returned here. OFFLINE endpoints are included:
+        hiding them is a UI filter, and a server that hides them makes an absent
+        tab and a policy decision look the same to every caller.
+        """
         body = self._load()
         endpoints = [self._decorate(dict(x)) for x in body.get("endpoints") or []]
-        endpoints.sort(key=lambda x: (not bool(x.get("online")), int(x.get("tabId") or 0)))
-        return {"schemaVersion": 1, "onlineGraceSeconds": ONLINE_GRACE_SECONDS, "endpoints": endpoints, "pins": dict(body.get("pins") or {})}
+        order = {STATE_ONLINE: 0, STATE_OFFLINE: 1, STATE_CLOSED: 2, STATE_EXPIRED: 3}
+        endpoints.sort(key=lambda x: (order.get(str(x.get("state")), 9), str(x.get("endpointId") or "")))
+        return {"schemaVersion": 2, "onlineGraceSeconds": ONLINE_GRACE_SECONDS,
+                "endpoints": endpoints}
 
     def endpoints_for_binding(self, binding: dict[str, Any], online_only: bool = True) -> list[dict[str, Any]]:
         rows = []
@@ -207,29 +537,14 @@ class EndpointRegistry:
             rows.append(ep)
         return rows
 
-    def pin(self, binding_id: str, tab_id: int) -> dict[str, Any]:
-        body = self._load()
-        tab_id = int(tab_id)
-        ep = next((self._decorate(dict(x)) for x in body.get("endpoints") or [] if int(x.get("tabId", -1)) == tab_id), None)
-        if ep is None:
-            raise EndpointError("endpoint not found")
-        body.setdefault("pins", {})[str(binding_id)] = {
-            "tabId": tab_id,
-            "stale": False,
-            "pinnedAt": utc_iso(),
-            "conversationId": ep.get("conversationId"),
-            "chatType": ep.get("chatType"),
-            "projectId": ep.get("projectId"),
-            "url": ep.get("url"),
-            "endpointId": ep.get("endpointId"),
-        }
-        self._save(body)
-        return ep
-
-    def unpin(self, binding_id: str) -> None:
-        body = self._load()
-        body.setdefault("pins", {}).pop(str(binding_id), None)
-        self._save(body)
+    # pin/unpin removed in slice 2.
+    #
+    # Selection stopped being a property written onto an endpoint: it is a
+    # relation between a session and a binding, established by selectEndpoint.
+    # There is deliberately no way left to *create* a pin. pin_state and
+    # pinned_tab survive only as read-side tails for callers that have not moved
+    # yet; after the schema-2 invalidation there is physically nothing for them
+    # to read, and they disappear with the selection rewrite.
 
     def pin_state(self, binding_id: str) -> dict[str, Any] | None:
         value = self._load().get("pins", {}).get(str(binding_id))

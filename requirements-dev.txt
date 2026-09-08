@@ -1,0 +1,8 @@
+# Exact versions the 107-test suite was last run against.
+# requirements-console.txt pins only aiohttp>=3.10,<4 for the product itself;
+# these are what the tests additionally need.
+aiohttp==3.14.3
+yarl==1.24.5
+multidict==6.7.1
+pytest==9.1.1
+# Python 3.12.3

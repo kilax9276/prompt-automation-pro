@@ -1,0 +1,989 @@
+{
+  "layout": "closed-S1",
+  "files": {
+    "console_releases/4.5.0-s1/executor.py": {
+      "sha256": "cceb102e0af7a3f25faa9a634b0f6135e6a52ab3a40b0d958b94ce5b580b7b25",
+      "lineCount": 1416,
+      "symbols": {
+        "RunExecutor": {
+          "start": 80,
+          "end": 1416,
+          "kind": "ClassDef"
+        },
+        "ensure_plan": {
+          "start": 118,
+          "end": 158,
+          "kind": "FunctionDef"
+        },
+        "ensure_state": {
+          "start": 179,
+          "end": 222,
+          "kind": "FunctionDef"
+        },
+        "execute_step": {
+          "start": 278,
+          "end": 357,
+          "kind": "AsyncFunctionDef"
+        },
+        "_execute_command": {
+          "start": 735,
+          "end": 959,
+          "kind": "AsyncFunctionDef"
+        },
+        "_execute_put_files": {
+          "start": 1004,
+          "end": 1043,
+          "kind": "AsyncFunctionDef"
+        },
+        "_handle_control": {
+          "start": 1117,
+          "end": 1124,
+          "kind": "FunctionDef"
+        },
+        "cancel_step": {
+          "start": 1197,
+          "end": 1239,
+          "kind": "AsyncFunctionDef"
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/protocol_engine.py": {
+      "sha256": "c436b29afd873fd78c8c37187a6d6baba05e7a257a81c721d5514abe57d5ba20",
+      "lineCount": 324,
+      "symbols": {
+        "EXECUTABLE_TYPES": {
+          "start": 12,
+          "end": 20,
+          "kind": "assignment"
+        },
+        "CONTROL_TYPES": {
+          "start": 22,
+          "end": 26,
+          "kind": "assignment"
+        },
+        "build_plan": {
+          "start": 51,
+          "end": 163,
+          "kind": "FunctionDef"
+        },
+        "plan_json": {
+          "start": 323,
+          "end": 324,
+          "kind": "FunctionDef"
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/console_server.py": {
+      "sha256": "565e8558d0a3607f9351c7246f44e7b38713d21ede23e4fdcb46bccbdcc3716a",
+      "lineCount": 1127,
+      "symbols": {
+        "ConsoleServer": {
+          "start": 34,
+          "end": 1045,
+          "kind": "ClassDef"
+        },
+        "list_runs": {
+          "start": 99,
+          "end": 173,
+          "kind": "FunctionDef"
+        },
+        "run_detail": {
+          "start": 175,
+          "end": 209,
+          "kind": "FunctionDef"
+        },
+        "scan_fingerprint": {
+          "start": 211,
+          "end": 217,
+          "kind": "FunctionDef"
+        },
+        "watcher": {
+          "start": 219,
+          "end": 238,
+          "kind": "AsyncFunctionDef"
+        },
+        "api_execute_step": {
+          "start": 359,
+          "end": 386,
+          "kind": "AsyncFunctionDef"
+        },
+        "api_log": {
+          "start": 439,
+          "end": 446,
+          "kind": "AsyncFunctionDef"
+        },
+        "api_delivery_prepare": {
+          "start": 618,
+          "end": 665,
+          "kind": "AsyncFunctionDef"
+        },
+        "api_delivery_poll": {
+          "start": 768,
+          "end": 788,
+          "kind": "AsyncFunctionDef"
+        },
+        "api_delivery_event": {
+          "start": 790,
+          "end": 804,
+          "kind": "AsyncFunctionDef"
+        },
+        "api_delivery_chunk": {
+          "start": 806,
+          "end": 818,
+          "kind": "AsyncFunctionDef"
+        },
+        "api_profiles": {
+          "start": 823,
+          "end": 844,
+          "kind": "AsyncFunctionDef"
+        },
+        "api_endpoint_pin": {
+          "start": 948,
+          "end": 972,
+          "kind": "AsyncFunctionDef"
+        },
+        "api_endpoint_unpin": {
+          "start": 974,
+          "end": 985,
+          "kind": "AsyncFunctionDef"
+        },
+        "on_startup": {
+          "start": 307,
+          "end": 321,
+          "kind": "AsyncFunctionDef"
+        },
+        "on_cleanup": {
+          "start": 323,
+          "end": 331,
+          "kind": "AsyncFunctionDef"
+        },
+        "create_app": {
+          "start": 1059,
+          "end": 1106,
+          "kind": "FunctionDef"
+        },
+        "endpoint timeout consume": {
+          "start": 655,
+          "end": 655,
+          "needle": "authorization.get(\"endpointWaitTimeoutSec\")",
+          "hits": [
+            655
+          ]
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/endpoint_registry.py": {
+      "sha256": "e7aea1faa752dab6fdacb5f3e6572097006cc95d078368b3097d576206242c19",
+      "lineCount": 276,
+      "symbols": {
+        "EndpointRegistry": {
+          "start": 72,
+          "end": 276,
+          "kind": "ClassDef"
+        },
+        "observe": {
+          "start": 100,
+          "end": 178,
+          "kind": "FunctionDef"
+        },
+        "list": {
+          "start": 188,
+          "end": 192,
+          "kind": "FunctionDef"
+        },
+        "endpoints_for_binding": {
+          "start": 194,
+          "end": 208,
+          "kind": "FunctionDef"
+        },
+        "pin": {
+          "start": 210,
+          "end": 227,
+          "kind": "FunctionDef"
+        },
+        "unpin": {
+          "start": 229,
+          "end": 232,
+          "kind": "FunctionDef"
+        },
+        "pin_state": {
+          "start": 234,
+          "end": 246,
+          "kind": "FunctionDef"
+        },
+        "pinned_tab": {
+          "start": 248,
+          "end": 250,
+          "kind": "FunctionDef"
+        },
+        "select_for_binding": {
+          "start": 252,
+          "end": 276,
+          "kind": "FunctionDef"
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/run_profile_context.py": {
+      "sha256": "1d833de7d454791effa0073af66996bdc1d0bb9758ef6a4a254748b23187e542",
+      "lineCount": 393,
+      "symbols": {
+        "RunProfileContext": {
+          "start": 28,
+          "end": 393,
+          "kind": "ClassDef"
+        },
+        "get": {
+          "start": 197,
+          "end": 210,
+          "kind": "FunctionDef"
+        },
+        "authorize_execution": {
+          "start": 212,
+          "end": 273,
+          "kind": "FunctionDef"
+        },
+        "_resolve_delivery_binding": {
+          "start": 288,
+          "end": 322,
+          "kind": "FunctionDef"
+        },
+        "authorize_delivery": {
+          "start": 324,
+          "end": 393,
+          "kind": "FunctionDef"
+        },
+        "ensure_run_context": {
+          "start": 127,
+          "end": 195,
+          "kind": "FunctionDef"
+        },
+        "endpoint timeout read/write": {
+          "start": 391,
+          "end": 391,
+          "needle": "\"endpointWaitTimeoutSec\": int(delivery.get(\"endpointWaitTimeoutSec\") or 3600)",
+          "hits": [
+            391
+          ]
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/delivery_manager.py": {
+      "sha256": "8a1575aa1e22e8f3903fd1cf4cfa866c7e98df95b9af993e1cd01a4c90d8d896",
+      "lineCount": 1536,
+      "symbols": {
+        "ACTIVE_ATTACHMENT_STATES": {
+          "start": 25,
+          "end": 25,
+          "kind": "assignment"
+        },
+        "TERMINAL_JOB_STATES": {
+          "start": 29,
+          "end": 29,
+          "kind": "assignment"
+        },
+        "CLAIM_LEASE_SECONDS": {
+          "start": 31,
+          "end": 31,
+          "kind": "assignment"
+        },
+        "DeliveryManager": {
+          "start": 106,
+          "end": 1536,
+          "kind": "ClassDef"
+        },
+        "job_dir": {
+          "start": 133,
+          "end": 140,
+          "kind": "FunctionDef"
+        },
+        "get_job": {
+          "start": 151,
+          "end": 158,
+          "kind": "FunctionDef"
+        },
+        "save_job": {
+          "start": 160,
+          "end": 166,
+          "kind": "FunctionDef"
+        },
+        "list_jobs": {
+          "start": 168,
+          "end": 180,
+          "kind": "FunctionDef"
+        },
+        "latest_job": {
+          "start": 182,
+          "end": 184,
+          "kind": "FunctionDef"
+        },
+        "create_job": {
+          "start": 281,
+          "end": 614,
+          "kind": "FunctionDef"
+        },
+        "find_latest_submitted_job": {
+          "start": 673,
+          "end": 736,
+          "kind": "FunctionDef"
+        },
+        "create_recovery_replay": {
+          "start": 801,
+          "end": 972,
+          "kind": "FunctionDef"
+        },
+        "pause_unfinished_jobs_after_restart": {
+          "start": 974,
+          "end": 1034,
+          "kind": "FunctionDef"
+        },
+        "supersede_older_jobs_for_tab": {
+          "start": 1036,
+          "end": 1069,
+          "kind": "FunctionDef"
+        },
+        "_derive_job_status": {
+          "start": 1071,
+          "end": 1100,
+          "kind": "FunctionDef"
+        },
+        "_lease_is_active": {
+          "start": 1102,
+          "end": 1105,
+          "kind": "FunctionDef"
+        },
+        "_touch_lease": {
+          "start": 1107,
+          "end": 1116,
+          "kind": "FunctionDef"
+        },
+        "_clear_lease": {
+          "start": 1118,
+          "end": 1122,
+          "kind": "FunctionDef"
+        },
+        "recover_expired_leases": {
+          "start": 1157,
+          "end": 1206,
+          "kind": "FunctionDef"
+        },
+        "poll_for_tab": {
+          "start": 1208,
+          "end": 1243,
+          "kind": "FunctionDef"
+        },
+        "update_from_client": {
+          "start": 1245,
+          "end": 1381,
+          "kind": "FunctionDef"
+        },
+        "attachment_chunk": {
+          "start": 1430,
+          "end": 1457,
+          "kind": "FunctionDef"
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/execution_error_detector.py": {
+      "sha256": "b6d182c1e1579ca4e2fc45606f1ecdefd8677a776b9458478f88cf096e3ed8b9",
+      "lineCount": 120,
+      "symbols": {
+        "ErrorSignature": {
+          "start": 10,
+          "end": 14,
+          "kind": "ClassDef"
+        },
+        "ExecutionErrorDetector": {
+          "start": 75,
+          "end": 120,
+          "kind": "ClassDef"
+        },
+        "feed": {
+          "start": 89,
+          "end": 113,
+          "kind": "FunctionDef"
+        },
+        "result": {
+          "start": 119,
+          "end": 120,
+          "kind": "FunctionDef"
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/profile_store.py": {
+      "sha256": "41302e1953f92e526f6abf676fe8992840ff6e8014d766cc0cd8a526780d3019",
+      "lineCount": 834,
+      "symbols": {
+        "ProfileStore": {
+          "start": 173,
+          "end": 570,
+          "kind": "ClassDef"
+        },
+        "_validate_profile": {
+          "start": 255,
+          "end": 370,
+          "kind": "FunctionDef"
+        },
+        "get_profile": {
+          "start": 388,
+          "end": 405,
+          "kind": "FunctionDef"
+        },
+        "save_profile": {
+          "start": 407,
+          "end": 473,
+          "kind": "FunctionDef"
+        },
+        "ProfileSnapshotStore": {
+          "start": 573,
+          "end": 711,
+          "kind": "ClassDef"
+        },
+        "_source_files": {
+          "start": 617,
+          "end": 642,
+          "kind": "FunctionDef"
+        },
+        "publish_current": {
+          "start": 678,
+          "end": 689,
+          "kind": "FunctionDef"
+        },
+        "publish_capture": {
+          "start": 691,
+          "end": 694,
+          "kind": "FunctionDef"
+        },
+        "ProfileActivationStore": {
+          "start": 714,
+          "end": 770,
+          "kind": "ClassDef"
+        },
+        "put": {
+          "start": 748,
+          "end": 770,
+          "kind": "FunctionDef"
+        },
+        "ProfileSessionStore": {
+          "start": 773,
+          "end": 834,
+          "kind": "ClassDef"
+        },
+        "ensure": {
+          "start": 807,
+          "end": 834,
+          "kind": "FunctionDef"
+        },
+        "endpoint timeout read": {
+          "start": 315,
+          "end": 315,
+          "needle": "timeout = int(delivery.get(\"endpointWaitTimeoutSec\") or 3600)",
+          "hits": [
+            315
+          ]
+        },
+        "endpoint timeout min": {
+          "start": 317,
+          "end": 317,
+          "needle": "endpointWaitTimeoutSec must be >=",
+          "hits": [
+            317
+          ]
+        },
+        "endpoint timeout max": {
+          "start": 319,
+          "end": 319,
+          "needle": "endpointWaitTimeoutSec is too large",
+          "hits": [
+            319
+          ]
+        },
+        "endpoint timeout write": {
+          "start": 362,
+          "end": 362,
+          "needle": "\"delivery\": {\"offlineTargetPolicy\": offline_policy, \"endpointWaitTimeoutSec\": timeout}",
+          "hits": [
+            362
+          ]
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/chat_bindings.py": {
+      "sha256": "3129ebe1336a589176f5164b5639ac248826f52fb6e6d0a7ab0d45809ec42f0c",
+      "lineCount": 186,
+      "symbols": {
+        "ChatBindingsStore": {
+          "start": 19,
+          "end": 186,
+          "kind": "ClassDef"
+        },
+        "_validate": {
+          "start": 69,
+          "end": 114,
+          "kind": "FunctionDef"
+        },
+        "create": {
+          "start": 124,
+          "end": 137,
+          "kind": "FunctionDef"
+        },
+        "update": {
+          "start": 139,
+          "end": 156,
+          "kind": "FunctionDef"
+        },
+        "find_for_chat": {
+          "start": 172,
+          "end": 176,
+          "kind": "FunctionDef"
+        },
+        "bindings_for_role": {
+          "start": 178,
+          "end": 186,
+          "kind": "FunctionDef"
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/profile_resolver.py": {
+      "sha256": "e316c0cf61203d3bd5f822bb949c24eacec6730547cc233528e3bab2f18aae20",
+      "lineCount": 102,
+      "symbols": {
+        "ProfileResolver": {
+          "start": 13,
+          "end": 102,
+          "kind": "ClassDef"
+        },
+        "identity_from_result": {
+          "start": 19,
+          "end": 39,
+          "kind": "FunctionDef"
+        },
+        "resolve": {
+          "start": 41,
+          "end": 102,
+          "kind": "FunctionDef"
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/static/app.js": {
+      "sha256": "da78b9663005e780972f8f4973aad5116308b12b0013ab32fe2254de4d86b110",
+      "lineCount": 1575,
+      "symbols": {
+        "refreshRuns": {
+          "start": 168,
+          "end": 173,
+          "needle": "async function refreshRuns()",
+          "hits": [
+            168
+          ]
+        },
+        "renderRuns": {
+          "start": 189,
+          "end": 211,
+          "needle": "function renderRuns()",
+          "hits": [
+            189
+          ]
+        },
+        "setView": {
+          "start": 1093,
+          "end": 1106,
+          "needle": "function setView(view)",
+          "hits": [
+            1093
+          ]
+        },
+        "profile delivery default": {
+          "start": 1142,
+          "end": 1142,
+          "needle": "delivery:{offlineTargetPolicy:'wait',endpointWaitTimeoutSec:3600}, directives:{},",
+          "hits": [
+            1142
+          ]
+        },
+        "profile delivery load": {
+          "start": 1166,
+          "end": 1166,
+          "needle": "$('endpointTimeoutInput').value = p.delivery?.endpointWaitTimeoutSec || 3600;",
+          "hits": [
+            1166
+          ]
+        },
+        "renderProfileRoles": {
+          "start": 1223,
+          "end": 1241,
+          "needle": "function renderProfileRoles()",
+          "hits": [
+            1223
+          ]
+        },
+        "profile delivery save": {
+          "start": 1284,
+          "end": 1284,
+          "needle": "endpointWaitTimeoutSec:Number",
+          "hits": [
+            1284
+          ]
+        },
+        "refreshChats": {
+          "start": 1387,
+          "end": 1403,
+          "needle": "async function refreshChats(options)",
+          "hits": [
+            1387
+          ]
+        },
+        "renderEndpoints": {
+          "start": 1405,
+          "end": 1447,
+          "needle": "function renderEndpoints()",
+          "hits": [
+            1405
+          ]
+        },
+        "renderBindings": {
+          "start": 1449,
+          "end": 1457,
+          "needle": "function renderBindings()",
+          "hits": [
+            1449
+          ]
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/static/index.html": {
+      "sha256": "19056b796757ae25e434fc113c9b3c8ea486c3fdc5fd0d321a8c26a4a09f300f",
+      "lineCount": 276,
+      "symbols": {
+        "navigation": {
+          "start": 46,
+          "end": 46,
+          "needle": "<nav class=\"section-nav\">",
+          "hits": [
+            46
+          ]
+        },
+        "runs sidebar": {
+          "start": 56,
+          "end": 56,
+          "needle": "<aside class=\"sidebar\">",
+          "hits": [
+            56
+          ]
+        },
+        "fullRunLog": {
+          "start": 110,
+          "end": 110,
+          "needle": "id=\"fullRunLog\"",
+          "hits": [
+            110
+          ]
+        },
+        "profile directives": {
+          "start": 237,
+          "end": 237,
+          "needle": "data-profile-panel=\"directives\"",
+          "hits": [
+            237
+          ]
+        },
+        "profile delivery": {
+          "start": 243,
+          "end": 243,
+          "needle": "data-profile-panel=\"delivery\"",
+          "hits": [
+            243
+          ]
+        },
+        "profile assigned chats": {
+          "start": 250,
+          "end": 250,
+          "needle": "id=\"profileAssignedChats\"",
+          "hits": [
+            250
+          ]
+        }
+      }
+    },
+    "console_releases/4.5.0-s1/static/style.css": {
+      "sha256": "82d30017d76392534317d92a8ab8dc1851fbee3736af72d4d45a2eb2974e5779",
+      "lineCount": 267,
+      "symbols": {
+        "run-list": {
+          "start": 45,
+          "end": 45,
+          "needle": ".run-list",
+          "hits": [
+            45
+          ]
+        },
+        "auto-error mark": {
+          "start": 121,
+          "end": 121,
+          "needle": "mark.log-stop-match",
+          "hits": [
+            121
+          ]
+        },
+        "section-nav": {
+          "start": 203,
+          "end": 203,
+          "needle": ".section-nav { display:flex;",
+          "hits": [
+            203
+          ]
+        },
+        "profile-tab-panel": {
+          "start": 238,
+          "end": 238,
+          "needle": ".profile-tab-panel { min-height:",
+          "hits": [
+            238
+          ]
+        }
+      }
+    },
+    "receivers/2.11.0-s1/server.py": {
+      "sha256": "ff3ed887453f767e898983a8ea87ab15181486bb3a955742dd2b1c196a888463",
+      "lineCount": 808,
+      "symbols": {
+        "ReceiverServer": {
+          "start": 118,
+          "end": 451,
+          "kind": "ClassDef"
+        },
+        "Handler": {
+          "start": 454,
+          "end": 786,
+          "kind": "ClassDef"
+        },
+        "_result": {
+          "start": 600,
+          "end": 632,
+          "kind": "FunctionDef"
+        },
+        "_status": {
+          "start": 634,
+          "end": 645,
+          "kind": "FunctionDef"
+        },
+        "_file_start": {
+          "start": 647,
+          "end": 680,
+          "kind": "FunctionDef"
+        },
+        "_record_completed": {
+          "start": 706,
+          "end": 730,
+          "kind": "FunctionDef"
+        },
+        "_file_finish": {
+          "start": 732,
+          "end": 748,
+          "kind": "FunctionDef"
+        }
+      }
+    },
+    "extension_releases/2.11.6/manifest.json": {
+      "sha256": "741453d48162ed8df785c09b6058146bf9513a4d19e6538397ac4b56a8d2278e",
+      "lineCount": 88,
+      "symbols": {
+        "permissions": {
+          "start": 6,
+          "end": 6,
+          "needle": "\"permissions\": [",
+          "hits": [
+            6
+          ]
+        },
+        "background": {
+          "start": 22,
+          "end": 22,
+          "needle": "\"background\": {",
+          "hits": [
+            22
+          ]
+        },
+        "version": {
+          "start": 4,
+          "end": 4,
+          "needle": "\"version\": \"2.11.6\"",
+          "hits": [
+            4
+          ]
+        }
+      }
+    },
+    "extension_releases/2.11.6/background.js": {
+      "sha256": "30830c99ec58a33b1ee7ba7fa190b374cecfc6c266a82cb1a11444d900eb87e7",
+      "lineCount": 1491,
+      "symbols": {
+        "SESSION_TABS_KEY": {
+          "start": 24,
+          "end": 24,
+          "needle": "const SESSION_TABS_KEY = \"enabledTabs\";",
+          "hits": [
+            24
+          ]
+        },
+        "SESSION_STATUS_KEY": {
+          "start": 25,
+          "end": 25,
+          "needle": "const SESSION_STATUS_KEY = \"tabStatuses\";",
+          "hits": [
+            25
+          ]
+        },
+        "isTabEnabled": {
+          "start": 74,
+          "end": 77,
+          "needle": "async function isTabEnabled(tabId)",
+          "hits": [
+            74
+          ]
+        },
+        "tabs.onRemoved": {
+          "start": 956,
+          "end": 960,
+          "needle": "chrome.tabs.onRemoved.addListener",
+          "hits": [
+            956
+          ]
+        },
+        "GET_RUNTIME_CONFIG": {
+          "start": 1293,
+          "end": 1312,
+          "needle": "if (message.type === \"GET_RUNTIME_CONFIG\")",
+          "hits": [
+            1293
+          ]
+        },
+        "POST_PARSE_RESULT": {
+          "start": 1341,
+          "end": 1369,
+          "needle": "if (message.type === \"POST_PARSE_RESULT\")",
+          "hits": [
+            1341
+          ]
+        },
+        "REQUIRED_SERVER_SERVICE": {
+          "start": 269,
+          "end": 269,
+          "needle": "const REQUIRED_SERVER_SERVICE",
+          "hits": [
+            269
+          ]
+        },
+        "base.port": {
+          "start": 1457,
+          "end": 1457,
+          "needle": "base.port = \"8871\"",
+          "hits": [
+            1457
+          ]
+        }
+      }
+    },
+    "extension_releases/2.11.6/content.js": {
+      "sha256": "b85583e200ab88b6fadeadd99c053f4104020ecc9c14a952b41d12f3cf6335b1",
+      "lineCount": 2302,
+      "symbols": {
+        "SOURCE_CONTENT": {
+          "start": 9,
+          "end": 9,
+          "needle": "const SOURCE_CONTENT",
+          "hits": [
+            9
+          ]
+        },
+        "SOURCE_PAGE": {
+          "start": 10,
+          "end": 10,
+          "needle": "const SOURCE_PAGE",
+          "hits": [
+            10
+          ]
+        },
+        "parseMessage": {
+          "start": 328,
+          "end": 500,
+          "needle": "const parseMessage =",
+          "hits": [
+            328
+          ]
+        },
+        "turnId:null": {
+          "start": 496,
+          "end": 496,
+          "needle": "turnId:null",
+          "hits": [
+            496
+          ]
+        },
+        "parsePage": {
+          "start": 502,
+          "end": 531,
+          "needle": "const parsePage =",
+          "hits": [
+            502
+          ]
+        },
+        "parserVersion": {
+          "start": 515,
+          "end": 515,
+          "needle": "parserVersion:",
+          "hits": [
+            515
+          ]
+        }
+      }
+    },
+    "extension_releases/2.11.6/chat-bridge.js": {
+      "sha256": "71272004262ef21e19cc75d0c2ce19fb242bf5d04afde1c1213f9d4b43a2c7e4",
+      "lineCount": 1957,
+      "symbols": {
+        "RECOVERY_SOURCE_KEY": {
+          "start": 15,
+          "end": 15,
+          "needle": "const RECOVERY_SOURCE_KEY",
+          "hits": [
+            15
+          ]
+        },
+        "runtimeConfig": {
+          "start": 161,
+          "end": 171,
+          "needle": "async function runtimeConfig()",
+          "hits": [
+            161
+          ]
+        },
+        "loop": {
+          "start": 1853,
+          "end": 1927,
+          "needle": "async function loop()",
+          "hits": [
+            1853
+          ]
+        }
+      }
+    }
+  },
+  "baseKind": "closed-S1",
+  "workingTrees": {
+    "console": "425bc1a8b77ab23b69997d98125f909f821b9a42",
+    "receiver": "f5ceaabab02513da2eafab9c593420918708fe63",
+    "extension": "65b0db4ed31d36f68bb3f6b832797d4e524edebc"
+  },
+  "historicalPoint": "830ab8c6453fa58ab1fd1339e210a41857e16df6",
+  "slice1Symbols": [
+    "console_releases/4.5.0-s1/profile_store.py:ProfileActivationStore",
+    "console_releases/4.5.0-s1/profile_store.py:ProfileSessionStore",
+    "console_releases/4.5.0-s1/profile_store.py:ProfileSnapshotStore",
+    "console_releases/4.5.0-s1/profile_store.py:_source_files",
+    "console_releases/4.5.0-s1/profile_store.py:ensure",
+    "console_releases/4.5.0-s1/profile_store.py:publish_capture",
+    "console_releases/4.5.0-s1/profile_store.py:publish_current",
+    "console_releases/4.5.0-s1/profile_store.py:put",
+    "console_releases/4.5.0-s1/run_profile_context.py:ensure_run_context"
+  ]
+}

@@ -27,7 +27,14 @@ from chat_bindings import ChatBindingError, ChatBindingsStore
 from endpoint_registry import EndpointError, EndpointRegistry
 from run_profile_context import ProfileAuthorizationError, RunProfileContext
 
-VERSION = "4.5.0-s1"
+VERSION = "4.5.0-s2"
+
+# The extension half of slice 2 ships as its own release; server and extension
+# are switched together, so the server names the one version it can speak to.
+# The wire compatibility version is the numeric manifest version. The repo
+# release directory carries the -s2 label; the protocol does not.
+REQUIRED_EXTENSION_VERSION = "2.12.0"
+POLL_KINDS = frozenset({"CONTROL_AGENT", "ENDPOINT"})
 CONSOLE_SERVER_KEY = web.AppKey("console_server", object)
 
 
@@ -765,20 +772,248 @@ class ConsoleServer:
                 status=500,
             )
 
+
+    # ---- version mismatch record -----------------------------------------
+    #
+    # One authoritative record, attached to the endpoint identity, never a
+    # second copy on the profile: two copies drift the moment one is cleared.
+    # It is a diagnostic fact, not a pause — the pause state does not exist
+    # until slice 5, and showing one earlier would show a state the system
+    # does not have.
+
+    def _mismatch_path(self) -> Path:
+        return self.root / "runtime" / "version-mismatch.json"
+
+    def _record_version_mismatch(self, expected: str, observed: str | None,
+                                 endpoint_id: str | None, browser_epoch: str | None) -> None:
+        """One record per scope, never a second copy.
+
+        A real 2.11.6 client sends neither endpointId nor browserEpoch, so it
+        cannot be keyed by endpoint identity — and inventing one from the URL is
+        exactly what the identity rules forbid. Such a client is recorded under
+        LEGACY_AGENT: a single row is enough because 4.5 has one control agent.
+        A client that already speaks slice-2 identity is recorded under
+        ENDPOINT and keyed by it.
+        """
+        path = self._mismatch_path()
+        try:
+            body = json.loads(path.read_text("utf-8")) if path.is_file() else {}
+        except Exception:
+            body = {}
+        rows = body.get("mismatches") if isinstance(body.get("mismatches"), dict) else {}
+        scope = "ENDPOINT" if endpoint_id else "LEGACY_AGENT"
+        key = f"ENDPOINT:{endpoint_id}" if endpoint_id else "LEGACY_AGENT"
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        row = rows.get(key) if isinstance(rows.get(key), dict) else {}
+        rows[key] = {
+            "scope": scope,
+            "expected": expected,
+            "observed": observed,
+            "endpointId": endpoint_id,
+            "browserEpoch": browser_epoch,
+            # Repeated incompatible polls refresh lastSeenAt; they do not
+            # multiply events.
+            "firstSeenAt": row.get("firstSeenAt") or now,
+            "lastSeenAt": now,
+        }
+        atomic_write_json(path, {"schemaVersion": 1, "mismatches": rows}, mode=0o640)
+
+    def _clear_version_mismatch(self, browser_epoch: str | None, scope: str | None = None) -> None:
+        """A compatible handshake clears the active record it proves obsolete.
+
+        A successful CONTROL_AGENT proof clears the LEGACY_AGENT record: the
+        agent that could not speak slice 2 has now spoken it. Without this the
+        record from a real 2.11.6 client would survive the upgrade for ever,
+        because it carries no epoch to match against.
+        """
+        path = self._mismatch_path()
+        if not path.is_file():
+            return
+        try:
+            body = json.loads(path.read_text("utf-8"))
+        except Exception:
+            return
+        rows = body.get("mismatches") if isinstance(body.get("mismatches"), dict) else {}
+        def obsolete(v: dict) -> bool:
+            if scope:
+                return str(v.get("scope") or "") == scope
+            return bool(browser_epoch) and str(v.get("browserEpoch") or "") == str(browser_epoch)
+        keep = {k: v for k, v in rows.items() if not obsolete(v)}
+        if keep != rows:
+            atomic_write_json(path, {"schemaVersion": 1, "mismatches": keep}, mode=0o640)
+
+    def version_mismatches(self) -> list[dict[str, Any]]:
+        path = self._mismatch_path()
+        if not path.is_file():
+            return []
+        try:
+            body = json.loads(path.read_text("utf-8"))
+        except Exception:
+            return []
+        rows = body.get("mismatches") if isinstance(body.get("mismatches"), dict) else {}
+        return sorted(rows.values(), key=lambda x: str(x.get("firstSeenAt") or ""))
+
+
+    # ---- browser protocol barrier ----------------------------------------
+
+    def _browser_barrier(self, request: web.Request, *, require_endpoint: bool):
+        """Settle version, epoch, ownership and endpoint state before mutation.
+
+        Shared by every route the browser can reach. Duplicating the checks per
+        route is how one of them ends up missing a check and becomes a way
+        around all the others — the delivery event route was exactly that: no
+        version gate, no epoch, no ownership, straight into delivery state.
+
+        Returns a validated context, or a web.Response to send back untouched.
+        """
+        query = request.rel_url.query
+        extension_version = str(query.get("extensionVersion") or "").strip()
+        browser_epoch = str(query.get("browserEpoch") or "").strip()
+        endpoint_id = str(query.get("endpointId") or "").strip()
+
+        if extension_version != REQUIRED_EXTENSION_VERSION:
+            self._record_version_mismatch(expected=REQUIRED_EXTENSION_VERSION,
+                                          observed=extension_version or None,
+                                          endpoint_id=endpoint_id or None,
+                                          browser_epoch=browser_epoch or None)
+            return None, web.json_response(
+                {"ok": False, "code": "EXTENSION_VERSION_INCOMPATIBLE",
+                 "expected": REQUIRED_EXTENSION_VERSION, "observed": extension_version or None},
+                status=409)
+        if not browser_epoch:
+            return None, web.json_response({"ok": False, "code": "BROWSER_EPOCH_REQUIRED"}, status=400)
+
+        control = self.endpoints.control_check(browser_epoch)
+        if control.get("conflict"):
+            return None, web.json_response({"ok": False, "code": "CONTROL_AGENT_CONFLICT",
+                                            "browserEpoch": browser_epoch,
+                                            "heldBy": control.get("heldBy")}, status=409)
+        if not control.get("owner"):
+            return None, web.json_response({"ok": False, "code": "NOT_CONTROL_OWNER",
+                                            "browserEpoch": browser_epoch}, status=409)
+
+        rollout = self.delivery.rollout_state()
+        if not rollout.get("valid", True):
+            # Rollout state that cannot be trusted is not a working mode. A
+            # damaged file used to surface as a latched DRAIN, which still
+            # permits events for claimed work — so damaging the persisted
+            # BARRIER reopened the very plane it had closed.
+            return None, web.json_response({"ok": False, "code": "DELIVERY_ROLLOUT_STATE_INVALID",
+                                            "error": rollout.get("stateError")}, status=409)
+        if rollout.get("mode") == "BARRIER":
+            # A real refusal, not a label. Control and diagnostics stay
+            # reachable; product delivery does not.
+            return None, web.json_response({"ok": False, "code": "DELIVERY_BARRIER"}, status=409)
+
+        if not require_endpoint:
+            return {"browserEpoch": browser_epoch, "endpointId": endpoint_id or None}, None
+
+        if not endpoint_id:
+            return None, web.json_response({"ok": False, "code": "ENDPOINT_ID_REQUIRED"}, status=400)
+        row = next((e for e in self.endpoints.list()["endpoints"]
+                    if str(e.get("endpointId") or "") == endpoint_id), None)
+        if row is None:
+            return None, web.json_response({"ok": False, "code": "ENDPOINT_UNKNOWN",
+                                            "endpointId": endpoint_id}, status=409)
+        if str(row.get("browserEpoch") or "") != browser_epoch:
+            return None, web.json_response({"ok": False, "code": "ENDPOINT_EPOCH_MISMATCH",
+                                            "endpointId": endpoint_id}, status=409)
+        if str(row.get("state") or "") in ("CLOSED", "EXPIRED"):
+            # A terminal endpoint must not move delivery state. Its tab is gone;
+            # accepting an event for it would attribute the outcome of a
+            # delivery to a target that cannot have received it.
+            return None, web.json_response({"ok": False, "code": "ENDPOINT_TERMINAL",
+                                            "endpointId": endpoint_id,
+                                            "state": row.get("state")}, status=409)
+        return {"browserEpoch": browser_epoch, "endpointId": endpoint_id, "endpoint": row}, None
+
     async def api_delivery_poll(self, request: web.Request) -> web.Response:
+        """Poll entry point. Every barrier runs before anything is recorded.
+
+        Order matters more than it looks. In 4.4.0 `observe` sat inside a
+        `try/except: pass`, so a client of an incompatible version reached the
+        registry first and only then failed — and its failure was swallowed. A
+        refusal that arrives after the state has already moved is not a refusal.
+        Version, kind and ownership are therefore settled here, before observe,
+        and outside any swallowing block.
+        """
         self.require_auth(request)
         query = request.rel_url.query
+
+        extension_version = str(query.get("extensionVersion") or "").strip()
+        poll_kind = str(query.get("pollKind") or "").strip().upper()
+        browser_epoch = str(query.get("browserEpoch") or "").strip()
+
+        if extension_version != REQUIRED_EXTENSION_VERSION:
+            # Recorded as a durable, single fact rather than an event per poll,
+            # so the operator can see which tabs were never updated instead of
+            # reading a repeating refusal in a log.
+            self._record_version_mismatch(expected=REQUIRED_EXTENSION_VERSION,
+                                          observed=extension_version or None,
+                                          endpoint_id=str(query.get("endpointId") or "").strip() or None,
+                                          browser_epoch=browser_epoch or None)
+            return web.json_response(
+                {"ok": False, "code": "EXTENSION_VERSION_INCOMPATIBLE",
+                 "expected": REQUIRED_EXTENSION_VERSION, "observed": extension_version or None},
+                status=409)
+        if poll_kind not in POLL_KINDS:
+            return web.json_response({"ok": False, "code": "POLL_KIND_INVALID",
+                                      "expected": sorted(POLL_KINDS)}, status=400)
+        if not browser_epoch:
+            return web.json_response({"ok": False, "code": "BROWSER_EPOCH_REQUIRED"}, status=400)
+
+        if poll_kind == "CONTROL_AGENT":
+            state = self.endpoints.acquire_control(browser_epoch)
+            if not state["owner"]:
+                # The loser gets no plan and no delivery. Showing the conflict
+                # while handing both epochs a plan would leave two reconcilers
+                # competing, which is the situation the lease exists to avoid.
+                return web.json_response({"ok": False, "code": "CONTROL_AGENT_CONFLICT",
+                                          "browserEpoch": browser_epoch,
+                                          "heldBy": state.get("heldBy")}, status=409)
+            self._clear_version_mismatch(browser_epoch, scope="LEGACY_AGENT")
+            self._clear_version_mismatch(browser_epoch)
+            return web.json_response({"ok": True, "controlState": "OWNER",
+                                      "browserEpoch": browser_epoch,
+                                      "leaseUntil": state["leaseUntil"],
+                                      "transferred": state["transferred"],
+                                      "reacquired": state.get("reacquired", False),
+                                      "expiredEndpoints": state["expiredEndpoints"]})
+
+        # The first ENDPOINT poll is what creates the endpoint, so this branch
+        # checks ownership but cannot require the endpoint to exist yet.
+        _ctx, refusal = self._browser_barrier(request, require_endpoint=False)
+        if refusal is not None:
+            return refusal
+
+        endpoint_id = str(query.get("endpointId") or "").strip()
+        if not endpoint_id:
+            return web.json_response({"ok": False, "code": "ENDPOINT_ID_REQUIRED"}, status=400)
+        chat_type = str(query.get("chatType") or "").strip()
+        conversation_id = str(query.get("conversationId") or "").strip()
+        project_id = str(query.get("projectId") or "").strip() or None
+        if not chat_type or not conversation_id:
+            return web.json_response({"ok": False, "code": "ENDPOINT_IDENTITY_REQUIRED"}, status=400)
         try:
             tab_id = int(query.get("tabId") or -1)
         except Exception:
             return web.json_response({"ok": False, "error": "invalid tabId"}, status=400)
         page = str(query.get("page") or "")
-        endpoint_id = str(query.get("endpointId") or "").strip() or None
         title = str(query.get("title") or "").strip() or None
+
+        # Deliberately not swallowed. On the new protocol path a registry
+        # refusal is the answer, not something to hide behind an empty 200 —
+        # that combination is what let a broken call look healthy.
         try:
-            self.endpoints.observe(tab_id, page, endpoint_id=endpoint_id, title=title)
-        except Exception:
-            pass
+            self.endpoints.observe(tab_id, page, endpoint_id=endpoint_id,
+                                   title=title, browser_epoch=browser_epoch,
+                                   chat_type=chat_type, conversation_id=conversation_id,
+                                   project_id=project_id)
+        except EndpointError as exc:
+            return web.json_response({"ok": False, "code": "ENDPOINT_REJECTED",
+                                      "error": str(exc)}, status=409)
+
+        self._clear_version_mismatch(browser_epoch)
         self._expire_endpoint_waits()
         job = self.delivery.poll_for_tab(tab_id, page)
         if job is not None:
@@ -789,12 +1024,22 @@ class ConsoleServer:
 
     async def api_delivery_event(self, request: web.Request) -> web.Response:
         self.require_auth(request)
+        ctx, refusal = self._browser_barrier(request, require_endpoint=True)
+        if refusal is not None:
+            return refusal
         run_id = request.match_info["run_id"]
         job_id = request.match_info["job_id"]
         try:
             body = await request.json()
             if not isinstance(body, dict):
                 body = {}
+            # The tab is taken from the endpoint the barrier just validated,
+            # never from the request body. Checking endpointId and then trusting
+            # a client-supplied tabId made the endpoint identity decorative: an
+            # endpoint belonging to one tab could claim and report on a delivery
+            # addressed to another simply by naming it.
+            body = dict(body)
+            body["tabId"] = int(ctx["endpoint"].get("tabId"))
             job = self.delivery.update_from_client(run_id, job_id, body)
             await self.publish({"type": "delivery:update", "runId": run_id, "job": job})
             return web.json_response({"ok": True, "job": job})
@@ -805,6 +1050,12 @@ class ConsoleServer:
 
     async def api_delivery_chunk(self, request: web.Request) -> web.Response:
         self.require_auth(request)
+        # Attachment bytes are part of a delivery in progress, so the same
+        # barrier applies: an incompatible or unowned client must not be able
+        # to read them just because this route is not the poll route.
+        ctx, refusal = self._browser_barrier(request, require_endpoint=True)
+        if refusal is not None:
+            return refusal
         run_id = request.match_info["run_id"]
         job_id = request.match_info["job_id"]
         attachment_id = request.match_info["attachment_id"]
@@ -812,7 +1063,14 @@ class ConsoleServer:
         try:
             offset = int(query.get("offset") or 0)
             limit = int(query.get("limit") or 512 * 1024)
-            body = self.delivery.attachment_chunk(run_id, job_id, attachment_id, offset, limit)
+            # Reading a chunk is part of performing a delivery, so it needs the
+            # same proof as reporting on one: the caller's own tab, and a live
+            # lease it holds. Without this a drain still handed out fresh parts
+            # of a delivery nobody had claimed.
+            body = self.delivery.attachment_chunk(
+                run_id, job_id, attachment_id, offset, limit,
+                tab_id=int(ctx["endpoint"].get("tabId")),
+                lease_token=str(query.get("leaseToken") or "").strip())
             return web.json_response(body)
         except DeliveryError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=404)
@@ -945,44 +1203,10 @@ class ConsoleServer:
             ), None)
         return web.json_response({"ok": True, **data})
 
-    async def api_endpoint_pin(self, request: web.Request) -> web.Response:
-        self.require_auth(request)
-        try:
-            tab_id = int(request.match_info["tab_id"])
-            body = await request.json()
-            binding_id = str((body or {}).get("bindingId") or "")
-            binding = self.bindings.get(binding_id)
-            if not binding:
-                raise EndpointError("binding not found")
-            # Validate before writing. Pinning first and rolling back on
-            # mismatch leaves a wrong pin on disk for the duration of the
-            # check, and it survives if the process dies in between.
-            observed = next(
-                (x for x in (self.endpoints.list().get("endpoints") or []) if int(x.get("tabId", -1)) == tab_id),
-                None,
-            )
-            if observed is None:
-                raise EndpointError("endpoint not found")
-            if str(observed.get("chatType")) != str(binding.get("chatType")) or str(observed.get("conversationId") or "") != str(binding.get("conversationId") or ""):
-                raise EndpointError("endpoint does not belong to binding conversation")
-            ep = self.endpoints.pin(binding_id, tab_id)
-            await self.publish({"type": "config:update", "kind": "endpoints"})
-            return web.json_response({"ok": True, "endpoint": ep, "bindingId": binding_id})
-        except (EndpointError, ValueError) as exc:
-            return web.json_response({"ok": False, "error": str(exc)}, status=409)
-
-    async def api_endpoint_unpin(self, request: web.Request) -> web.Response:
-        self.require_auth(request)
-        try:
-            body = await request.json() if request.can_read_body else {}
-        except Exception:
-            body = {}
-        binding_id = str((body or {}).get("bindingId") or "")
-        if not binding_id:
-            return web.json_response({"ok": False, "error": "bindingId required"}, status=400)
-        self.endpoints.unpin(binding_id)
-        await self.publish({"type": "config:update", "kind": "endpoints"})
-        return web.json_response({"ok": True})
+    # api_endpoint_pin / api_endpoint_unpin removed in slice 2. Pinning an
+    # endpoint is no longer an operation: selection is a session-binding
+    # relation established by selectEndpoint, and leaving a route that can
+    # still create the old shape would let the removed semantics back in.
 
     async def api_config_history(self, request: web.Request) -> web.Response:
         self.require_auth(request)
@@ -1097,8 +1321,6 @@ def create_app(root: Path, data_dir: Path, token_file: Path) -> web.Application:
     app.router.add_put("/api/chat-bindings/{binding_id}", server.api_binding_update)
     app.router.add_delete("/api/chat-bindings/{binding_id}", server.api_binding_delete)
     app.router.add_get("/api/endpoints", server.api_endpoints)
-    app.router.add_post("/api/endpoints/{tab_id}/pin", server.api_endpoint_pin)
-    app.router.add_delete("/api/endpoints/{tab_id}/pin", server.api_endpoint_unpin)
     app.router.add_get("/api/config-history", server.api_config_history)
     app.router.add_get("/ws", server.websocket)
     app.on_startup.append(server.on_startup)

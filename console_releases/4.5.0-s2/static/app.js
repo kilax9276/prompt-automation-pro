@@ -1393,7 +1393,9 @@
     await loadProfilesAndBindings();
     const epBody = await api('/api/endpoints');
     state.endpoints = epBody.endpoints || [];
-    state.endpointPins = epBody.pins || {};
+    // Selection policy no longer travels with the endpoint listing; pinning
+    // was removed with the old selection semantics.
+    state.endpointPins = {};
     $('chatsSummary').innerHTML = `<span class="badge good">Online: ${state.endpoints.filter(x=>x.online).length}</span><span class="badge">Endpoints: ${state.endpoints.length}</span><span class="badge">Bindings: ${state.bindings.length}</span><span class="badge">rev ${esc(state.bindingsRevision)}</span>`;
     if (!force && (state.chatsInteractionEpoch !== epoch || chatsInteractionActive())) {
       scheduleChatsRerender();
@@ -1437,13 +1439,11 @@
       return `<div class="management-card ${ep.online ? '' : 'offline-card'}">
         <div class="management-card-head"><div><strong>${esc((ep.chatType || 'unknown').toUpperCase())} · tab ${esc(ep.tabId)}</strong><div class="mono hint wrap">${esc(ep.conversationId || 'no conversation id')}</div></div><span class="badge ${ep.online ? 'good' : 'offline'}">${ep.online ? 'online' : 'offline'}</span></div>
         <div class="hint wrap">${esc(ep.url || '')}</div><div class="management-kv"><span>Project</span><b class="mono">${esc(ep.projectId || '-')}</b><span>Last seen</span><b>${esc(ep.lastSeenAt || '-')}</b><span>Endpoint ID</span><b class="mono">${esc(ep.endpointId || 'нет в 4.4.0')}</b></div>
-        ${b ? `<div class="binding-summary"><b>${esc(b.name)}</b> · ${esc(b.profileId)} / ${esc(b.role)} ${pinBadge}</div>${telemetry}${pinNotice}<div class="buttons"><button class="edit-binding" data-binding="${esc(b.bindingId)}">Править привязку</button>${(!pinned && ep.online) ? `<button class="pin-endpoint" data-tab="${esc(ep.tabId)}" data-binding="${esc(b.bindingId)}">Закрепить эту вкладку</button>` : ''}${canConfirm ? `<button class="pin-endpoint" data-tab="${esc(ep.tabId)}" data-binding="${esc(b.bindingId)}">Закрепить заново</button>` : ''}${pinned ? `<button class="unpin-endpoint" data-tab="${esc(ep.tabId)}" data-binding="${esc(b.bindingId)}">Снять pin</button>` : ''}</div>` : `<button class="bind-endpoint primary" data-tab="${esc(ep.tabId)}">Привязать</button>`}
+        ${b ? `<div class="binding-summary"><b>${esc(b.name)}</b> · ${esc(b.profileId)} / ${esc(b.role)} ${pinBadge}</div>${telemetry}${pinNotice}<div class="buttons"><button class="edit-binding" data-binding="${esc(b.bindingId)}">Править привязку</button></div>` : `<button class="bind-endpoint primary" data-tab="${esc(ep.tabId)}">Привязать</button>`}
       </div>`;
     }).join('') || '<div class="empty-management">Поддерживаемые вкладки пока не пульсировали в pro2 Console.</div>';
     document.querySelectorAll('.bind-endpoint').forEach(btn => btn.onclick = () => openBinding(null, state.endpoints.find(x=>String(x.tabId)===String(btn.dataset.tab))));
     document.querySelectorAll('.edit-binding').forEach(btn => btn.onclick = () => openBinding(btn.dataset.binding));
-    document.querySelectorAll('.pin-endpoint').forEach(btn => btn.onclick = () => pinEndpoint(btn.dataset.binding, btn.dataset.tab, btn));
-    document.querySelectorAll('.unpin-endpoint').forEach(btn => btn.onclick = () => unpinEndpoint(btn.dataset.binding, btn.dataset.tab, btn));
   }
 
   function renderBindings() {
@@ -1511,18 +1511,6 @@
     return () => { btn.disabled = restore.disabled; btn.textContent = restore.text; };
   }
 
-  async function pinEndpoint(bindingId, tabId, btn) {
-    const release = withBusy(btn, 'Отправляю…');
-    if (btn && !release) return;
-    try { await api(`/api/endpoints/${encodeURIComponent(tabId)}/pin`,{method:'POST',body:JSON.stringify({bindingId})}); toast(`Вкладка ${tabId} подтверждена и закреплена до конца сессии браузера`); } catch (e) { toast(`Закрепление отклонено: ${e.message}`); }
-    finally { if (release) release(); state.chatsInteractionUntil = 0; state.chatsPointerDown = false; await refreshChats({force:true}); }
-  }
-  async function unpinEndpoint(bindingId, tabId, btn) {
-    const release = withBusy(btn, 'Снимаю…');
-    if (btn && !release) return;
-    try { await api(`/api/endpoints/${encodeURIComponent(tabId)}/pin`,{method:'DELETE',body:JSON.stringify({bindingId})}); toast('Runtime pin снят'); } catch (e) { toast(`Ошибка: ${e.message}`); }
-    finally { if (release) release(); state.chatsInteractionUntil = 0; state.chatsPointerDown = false; await refreshChats({force:true}); }
-  }
 
   async function refreshHistory() {
     const body = await api('/api/config-history?limit=500'); state.history = body.history || [];

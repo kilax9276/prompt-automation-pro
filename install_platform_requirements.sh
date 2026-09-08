@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Copyright (c) 2026 Kolobov Aleksei (@kilax9276)
-# All rights reserved. See LICENSE at the repository root.
 set -euo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION-platform")"

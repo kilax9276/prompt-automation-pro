@@ -1,0 +1,540 @@
+--- srv_s2/console_releases/4.5.0-s2/delivery_manager.py	2026-09-07 11:06:25.190134048 +0000
++++ pkg_s2/console_releases/4.5.0-s2/delivery_manager.py	2026-09-07 18:04:46.340930225 +0000
+@@ -27,6 +27,22 @@
+ READY_ATTACHMENT_STATES = {'UPLOADED'}
+ PENDING_ATTACHMENT_STATES = {'PENDING', 'RETRY_PENDING', 'RECOVER_PENDING'}
+ TERMINAL_JOB_STATES = {'SENT', 'CONSUMED', 'SUPERSEDED', 'CANCELLED'}
++
++# Rollout modes for the breaking boundary.
++#
++#   OPEN    normal operation
++#   DRAIN   no new work is handed out and no new claim may be taken; events for
++#           work already claimed are still accepted so it can finish
++#   BARRIER new delivery work is refused outright
++#
++# DRAIN is a pass with an identity of its own, not merely "there are no leases
++# right now". A lease that existed and expired during the pass leaves an
++# outcome nobody can report on, and an empty queue afterwards is not evidence
++# that the outcome is known.
++ROLLOUT_OPEN = 'OPEN'
++ROLLOUT_DRAIN = 'DRAIN'
++ROLLOUT_BARRIER = 'BARRIER'
++ROLLOUT_MODES = (ROLLOUT_OPEN, ROLLOUT_DRAIN, ROLLOUT_BARRIER)
+ PAUSED_JOB_STATE = 'PAUSED_AFTER_RESTART'
+ CLAIM_LEASE_SECONDS = 15
+ MAX_AUTO_RECOVERIES = 3
+@@ -1099,17 +1115,350 @@
+         else:
+             job['status'] = 'QUEUED'
+ 
++
++    # ---- rollout mode -----------------------------------------------------
++
++    def _rollout_path(self) -> Path:
++        path = self.data_dir.parent / 'runtime' / 'delivery-rollout.json'
++        path.parent.mkdir(parents=True, exist_ok=True)
++        return path
++
++    @staticmethod
++    def _unsafe_state(reason: str) -> dict[str, Any]:
++        """State that cannot be trusted at all, as distinct from a latched drain.
++
++        These are different things and were conflated. A valid DRAIN with the
++        latch set still permits events for already-claimed work, so presenting
++        an unreadable file as a latched DRAIN reopened the delivery plane
++        exactly when the persisted BARRIER had been damaged.
++        """
++        return {'mode': ROLLOUT_DRAIN, 'drainId': None, 'unsafe': True,
++                'valid': False, 'stateError': reason,
++                'unsafeReasons': [reason], 'startedAt': None}
++
++    @staticmethod
++    def _aware_ts(value: Any) -> bool:
++        if not isinstance(value, str) or not value.strip():
++            return False
++        parsed = iso_dt(value)
++        return bool(parsed and parsed.tzinfo is not None and parsed.utcoffset() is not None)
++
++    def rollout_state(self) -> dict[str, Any]:
++        """Read the rollout state, treating anything unexpected as unsafe.
++
++        Filling in defaults for a partially written DRAIN would invent the very
++        fact the latch exists to preserve: this writer always stores drainId,
++        startedAt, unsafe and unsafeReasons together, so a DRAIN missing any of
++        them was not written by it.
++        """
++        path = self._rollout_path()
++        if not path.is_file():
++            return {'mode': ROLLOUT_OPEN, 'drainId': None, 'unsafe': False,
++                    'valid': True, 'unsafeReasons': [], 'startedAt': None}
++        try:
++            body = json.loads(path.read_text('utf-8'))
++        except Exception:
++            return self._unsafe_state('rollout state unreadable')
++        if not isinstance(body, dict):
++            return self._unsafe_state('rollout state is not an object')
++        mode = body.get('mode')
++        if mode not in ROLLOUT_MODES:
++            return self._unsafe_state(f'unknown rollout mode {mode!r}')
++        if mode == ROLLOUT_OPEN:
++            # Absence of the file means OPEN; this writer never stores an OPEN
++            # file. So a stored OPEN is not a canonical state, and accepting it
++            # meant that damaging one field of a valid BARRIER — the word
++            # BARRIER itself — reopened the delivery plane while the rest of the
++            # record still said otherwise.
++            return self._unsafe_state(
++                'rollout state stores OPEN, which this writer never produces')
++        if not isinstance(body.get('drainId'), str) or not body['drainId'].strip():
++            return self._unsafe_state('rollout state has no drainId')
++        if not self._aware_ts(body.get('startedAt')):
++            return self._unsafe_state('rollout startedAt is not a timezone-aware timestamp')
++        if not isinstance(body.get('unsafe'), bool):
++            return self._unsafe_state('rollout state has no unsafe flag')
++        reasons = body.get('unsafeReasons')
++        if not isinstance(reasons, list) or not all(isinstance(r, str) for r in reasons):
++            return self._unsafe_state('rollout unsafeReasons is not a list of strings')
++        # This writer never stores one without the other. A cleared flag beside
++        # recorded reasons is not a safe drain; it is a state nobody wrote.
++        if bool(body['unsafe']) != bool(reasons):
++            return self._unsafe_state(
++                'rollout unsafe flag contradicts unsafeReasons')
++        # Canonical shapes, symmetric on purpose: a BARRIER carries enteredAt
++        # and a DRAIN does not. Without the second half, damaging one word of a
++        # valid BARRIER turned it into an acceptable DRAIN with the barrier's
++        # own timestamp still inside.
++        if mode == ROLLOUT_BARRIER and not self._aware_ts(body.get('enteredAt')):
++            return self._unsafe_state('barrier enteredAt is not a timezone-aware timestamp')
++        if mode == ROLLOUT_DRAIN and body.get('enteredAt') is not None:
++            return self._unsafe_state('drain state carries a barrier enteredAt')
++        body['valid'] = True
++        return body
++
++    def _write_rollout(self, body: dict[str, Any]) -> None:
++        atomic_write_json(self._rollout_path(), body)
++
++    def begin_drain(self) -> dict[str, Any]:
++        """Start a drain pass with its own identity.
++
++        Restarting the pass is what clears the latch, and only an operator can
++        do that: an automatic reset would turn "we lost track of an outcome"
++        into "there is nothing outstanding".
++        """
++        state = {'mode': ROLLOUT_DRAIN, 'drainId': uuid.uuid4().hex,
++                 'startedAt': utc_now(), 'unsafe': False, 'unsafeReasons': []}
++        self._write_rollout(state)
++        return state
++
++    def mark_unsafe(self, reason: str) -> dict[str, Any]:
++        """Latch the drain as unsafe. Monotonic within a pass."""
++        state = self.rollout_state()
++        if state.get('mode') != ROLLOUT_DRAIN:
++            return state
++        reasons = list(state.get('unsafeReasons') or [])
++        if reason not in reasons:
++            reasons.append(reason)
++        state['unsafe'] = True
++        state['unsafeReasons'] = reasons
++        self._write_rollout(state)
++        return state
++
++
++    # ---- lease evidence during a drain ------------------------------------
++
++    LEASE_NONE = 'NO_LEASE'
++    LEASE_ACTIVE = 'ACTIVE'
++    LEASE_EXPIRED = 'EXPIRED'
++    LEASE_INVALID = 'INVALID'
++
++    def classify_lease(self, job: dict[str, Any]) -> tuple[str, str]:
++        """Classify the lease trace on disk, not merely whether it is live now.
++
++        `_lease_is_active` answers False for a missing lease and for a
++        contradictory one alike, and the drain read that as "nothing here".
++        A half-written lease is an unknown outcome, not an absent one, so the
++        two must be told apart before the boundary closes over them.
++        """
++        token = job.get('claimLeaseToken')
++        expires_raw = job.get('claimExpiresAt')
++        # CLAIM writes these four together and _clear_lease removes them
++        # together, so any subset is a half-written trace, not an absent lease.
++        # clientHeartbeatAt is deliberately excluded: it outlives _clear_lease.
++        claimed_by = job.get('claimedBy')
++        present = {
++            'claimLeaseToken': isinstance(token, str) and token.strip() != '',
++            'claimExpiresAt': isinstance(expires_raw, str) and expires_raw.strip() != '',
++            'claimHeartbeatAt': isinstance(job.get('claimHeartbeatAt'), str)
++                                and str(job.get('claimHeartbeatAt')).strip() != '',
++            'claimedBy': isinstance(claimed_by, dict) and bool(claimed_by),
++        }
++        if not any(present.values()):
++            return self.LEASE_NONE, ''
++        missing = [name for name, ok in present.items() if not ok]
++        if missing:
++            return self.LEASE_INVALID, 'incomplete lease trace, missing ' + ', '.join(missing)
++        if not self._aware_ts(job.get('claimHeartbeatAt')):
++            return self.LEASE_INVALID, 'claimHeartbeatAt is not a timezone-aware timestamp'
++        # claimedBy is the provenance CLAIM records: which tab took the lease,
++        # where, when, and under which token. Validated against that shape
++        # rather than a simpler one — a classifier that disagrees with the
++        # writer rejects leases the server itself created.
++        if not isinstance(claimed_by.get('tabId'), int) or isinstance(claimed_by.get('tabId'), bool):
++            return self.LEASE_INVALID, 'claimedBy.tabId is not an integer'
++        if not isinstance(claimed_by.get('url'), str):
++            return self.LEASE_INVALID, 'claimedBy.url is not a string'
++        if not self._aware_ts(claimed_by.get('at')):
++            return self.LEASE_INVALID, 'claimedBy.at is not a timezone-aware timestamp'
++        claimed_token = claimed_by.get('leaseToken')
++        if not isinstance(claimed_token, str) or claimed_token.strip() != str(token).strip():
++            return self.LEASE_INVALID, 'claimedBy.leaseToken disagrees with claimLeaseToken'
++        has_token = True
++        has_expiry = True
++        expires = iso_dt(expires_raw)
++        if expires is None:
++            return self.LEASE_INVALID, f'unreadable claimExpiresAt {expires_raw!r}'
++        if expires.tzinfo is None or expires.utcoffset() is None:
++            return self.LEASE_INVALID, f'claimExpiresAt has no timezone: {expires_raw!r}'
++        if expires > utc_now_dt():
++            return self.LEASE_ACTIVE, ''
++        return self.LEASE_EXPIRED, ''
++
++    def _drain_reconcile(self) -> None:
++        """Latch anything a drain cannot account for, across every process.
++
++        Deliberately ignores dispatchEpoch. `recover_expired_leases` skips jobs
++        of a previous epoch, so a console restarted mid-drain stopped seeing the
++        lease it was waiting on: while alive it blocked the barrier, and the
++        moment it expired it vanished from the check entirely and the barrier
++        opened. Work outstanding from the old process is still outstanding.
++        """
++        if str(self.rollout_state().get('mode') or '') != ROLLOUT_DRAIN:
++            return
++        for job, error in self._iter_jobs_strict():
++            if error is not None:
++                self.mark_unsafe(f'unreadable delivery job during drain: {error}')
++                continue
++            if str(job.get('status') or '') in TERMINAL_JOB_STATES:
++                continue
++            kind, detail = self.classify_lease(job)
++            if kind == self.LEASE_EXPIRED:
++                self.mark_unsafe(
++                    f"lease expired during drain: run={job.get('runId')} "
++                    f"job={job.get('jobId')} status={job.get('status')}")
++            elif kind == self.LEASE_INVALID:
++                self.mark_unsafe(
++                    f"invalid lease state during drain: run={job.get('runId')} "
++                    f"job={job.get('jobId')}: {detail}")
++
++    def drain_status(self) -> dict[str, Any]:
++        """What still stands between this drain and the barrier."""
++        state = self.rollout_state()
++        outstanding: list[dict[str, Any]] = []
++        for job, error in self._iter_jobs_strict():
++            if error is not None:
++                # A delivery job that cannot be read is an unknown outcome, not
++                # an absent one. Tolerant loading turned it into {} and it
++                # disappeared from the check entirely.
++                outstanding.append({'runId': None, 'jobId': None,
++                                    'reason': f'unreadable job: {error}'})
++                continue
++            status = str(job.get('status') or '')
++            if status in TERMINAL_JOB_STATES:
++                kind, detail = self.classify_lease(job)
++                if kind != self.LEASE_NONE:
++                    # A finished job still holding a lease is a contradiction,
++                    # not silence: either the lease was never ended or the job
++                    # was terminated under someone who still held it.
++                    outstanding.append({**{'runId': job.get('runId'), 'jobId': job.get('jobId')},
++                                        'reason': f'terminal job still holding a {kind} lease'})
++                continue
++            ref = {'runId': job.get('runId'), 'jobId': job.get('jobId')}
++            # Browser quiet is not only about leases: an attachment still being
++            # fetched or uploaded is a browser operation in flight, and closing
++            # the boundary over it would cut the operation the design says must
++            # finish first.
++            for attachment in job.get('attachments') or []:
++                state_name = str(attachment.get('state') or '')
++                if state_name in ACTIVE_ATTACHMENT_STATES:
++                    outstanding.append({**ref, 'reason': f'attachment {state_name}',
++                                        'attachmentId': attachment.get('attachmentId')})
++            kind, detail = self.classify_lease(job)
++            if kind == self.LEASE_ACTIVE:
++                outstanding.append({**ref, 'reason': 'claimed'})
++            elif kind == self.LEASE_EXPIRED:
++                outstanding.append({**ref, 'reason': 'lease expired, outcome unknown'})
++            elif kind == self.LEASE_INVALID:
++                outstanding.append({**ref, 'reason': f'invalid lease state: {detail}'})
++            elif status == 'DISPATCHING':
++                outstanding.append({**ref, 'reason': 'dispatching'})
++        return {'mode': state.get('mode'), 'drainId': state.get('drainId'),
++                'unsafe': bool(state.get('unsafe')),
++                'unsafeReasons': list(state.get('unsafeReasons') or []),
++                'outstanding': outstanding,
++                'barrierAllowed': (state.get('mode') == ROLLOUT_DRAIN
++                                   and not state.get('unsafe') and not outstanding)}
++
++    def enter_barrier(self) -> dict[str, Any]:
++        """Close the boundary, or refuse and say what is in the way.
++
++        Recovery runs here rather than being expected beforehand. A lease that
++        expired during the drain stops counting as active the moment it expires,
++        so a barrier evaluated without recovery sees a quiet queue and closes
++        over an outcome nobody recorded. Safety must not depend on the caller
++        remembering the right order.
++        """
++        self.recover_expired_leases()
++        # Across every process, not only this one's epoch.
++        self._drain_reconcile()
++        status = self.drain_status()
++        if not status['barrierAllowed']:
++            raise DeliveryError(
++                'BARRIER_REFUSED: ' + json.dumps({'unsafe': status['unsafe'],
++                                                  'unsafeReasons': status['unsafeReasons'],
++                                                  'outstanding': status['outstanding']},
++                                                 ensure_ascii=False))
++        state = self.rollout_state()
++        state['mode'] = ROLLOUT_BARRIER
++        state['enteredAt'] = utc_now()
++        self._write_rollout(state)
++        return state
++
++    def _iter_jobs(self):
++        for job, error in self._iter_jobs_strict():
++            if error is None:
++                yield job
++
++    def _iter_jobs_strict(self):
++        """Every persisted delivery job, reporting the ones that cannot be read."""
++        if not self.data_dir.is_dir():
++            return
++        for run_dir in sorted(self.data_dir.iterdir()):
++            delivery_root = run_dir / 'executor' / 'delivery'
++            if not delivery_root.is_dir():
++                continue
++            for job_dir in sorted(delivery_root.iterdir()):
++                job_file = job_dir / 'job.json'
++                if not job_file.is_file():
++                    continue
++                try:
++                    job = json.loads(job_file.read_text('utf-8'))
++                except Exception as exc:
++                    yield None, f'{job_file}: {exc}'
++                    continue
++                if not isinstance(job, dict) or not job.get('jobId'):
++                    yield None, f'{job_file}: not a delivery job'
++                    continue
++                # Only what browser quiet depends on, not the whole schema.
++                attachments = job.get('attachments', [])
++                if not isinstance(attachments, list):
++                    yield None, f'{job_file}: attachments is not a list'
++                    continue
++                if any(not isinstance(a, dict) for a in attachments):
++                    yield None, f'{job_file}: attachments contains a non-object'
++                    continue
++                if str(job.get('status') or '') in TERMINAL_JOB_STATES and any(
++                        str(a.get('state') or '') in ACTIVE_ATTACHMENT_STATES for a in attachments):
++                    # A finished job cannot still be uploading. Reading this as
++                    # quiet would take a contradiction for proof of silence.
++                    yield None, (f'{job_file}: terminal job with an attachment still in flight')
++                    continue
++                yield job, None
++
+     def _lease_is_active(self, job: dict[str, Any]) -> bool:
+-        token = str(job.get('claimLeaseToken') or '')
+-        expires = iso_dt(job.get('claimExpiresAt'))
+-        return bool(token and expires and expires > utc_now_dt())
++        """One source of truth for lease liveness.
++
++        Comparing the timestamp here as well left a second place that could meet
++        a naive value and raise a bare TypeError, and a second definition of
++        "active" that could drift from the classifier.
++        """
++        return self.classify_lease(job)[0] == self.LEASE_ACTIVE
+ 
+     def _touch_lease(self, job: dict[str, Any], lease_token: str) -> None:
+-        if str(job.get('claimLeaseToken') or '') != str(lease_token or ''):
+-            raise DeliveryError('delivery lease token mismatch')
+-        expires = iso_dt(job.get('claimExpiresAt'))
+-        if expires is not None and expires <= utc_now_dt():
++        """Every non-CLAIM event needs a live lease that this client holds.
++
++        The old comparison matched an empty stored token against an empty
++        requested one and, finding no expiry to object to, wrote a fresh one:
++        a lease conjured out of nothing. During a drain that let unclaimed work
++        keep moving, and RELEASE could erase a contradictory trace the latch was
++        holding, opening the barrier over it.
++        """
++        kind, detail = self.classify_lease(job)
++        if kind == self.LEASE_NONE:
++            raise DeliveryError('DELIVERY_NOT_LEASED: job has no delivery lease')
++        if kind == self.LEASE_EXPIRED:
++            self._latch_if_draining_reason(
++                job, f"event on an expired lease: run={job.get('runId')} job={job.get('jobId')}")
+             raise DeliveryError('delivery lease expired')
++        if kind == self.LEASE_INVALID:
++            self._latch_if_draining_reason(
++                job, f"event on an invalid lease state: run={job.get('runId')} "
++                     f"job={job.get('jobId')}: {detail}")
++            raise DeliveryError(f'DELIVERY_LEASE_INVALID: {detail}')
++        requested = str(lease_token or '').strip()
++        if not requested or str(job.get('claimLeaseToken') or '').strip() != requested:
++            raise DeliveryError('delivery lease token mismatch')
+         now = utc_now()
+         job['claimHeartbeatAt'] = now
+         job['clientHeartbeatAt'] = now
+@@ -1154,6 +1503,24 @@
+             )
+         return True
+ 
++    def _latch_if_draining_reason(self, job: dict[str, Any], reason: str) -> None:
++        if str(self.rollout_state().get('mode') or '') == ROLLOUT_DRAIN:
++            self.mark_unsafe(reason)
++
++    def _latch_if_draining(self, job: dict[str, Any]) -> None:
++        """A lease that expired during a drain leaves an outcome nobody knows.
++
++        Latching here rather than at barrier time is deliberate: by the time the
++        barrier is checked the lease is gone from the table, and an empty table
++        would otherwise read as proof that everything finished.
++        """
++        state = self.rollout_state()
++        if str(state.get('mode') or '') != ROLLOUT_DRAIN:
++            return
++        self.mark_unsafe(
++            f"lease expired during drain: run={job.get('runId')} job={job.get('jobId')} "
++            f"status={job.get('status')}")
++
+     def recover_expired_leases(self) -> list[dict[str, Any]]:
+         changed: list[dict[str, Any]] = []
+         if not self.data_dir.is_dir():
+@@ -1181,9 +1548,12 @@
+                     if str(job.get('dispatchEpoch') or '') != self.dispatch_epoch:
+                         continue
+ 
+-                    token = str(job.get('claimLeaseToken') or '')
+-                    expires = iso_dt(job.get('claimExpiresAt'))
+-                    if not token or not expires or expires > now_dt:
++                    # Classified rather than compared directly: a naive
++                    # timestamp used to meet an aware one here and raise a bare
++                    # TypeError from inside recovery. An unclassifiable lease is
++                    # not recovered — it is left for the drain to latch.
++                    kind, _detail = self.classify_lease(job)
++                    if kind != self.LEASE_EXPIRED:
+                         continue
+ 
+                     for attachment in job.get('attachments') or []:
+@@ -1198,6 +1568,10 @@
+                             'Delivery lease expired while Send was pending; explicit Send is required'
+                         )
+ 
++                    # Latch before the trace is cleared: afterwards the lease
++                    # is gone from the table and an empty table would read as
++                    # proof that the delivery finished.
++                    self._latch_if_draining(job)
+                     self._clear_lease(job)
+                     job['leaseRecoveredAt'] = utc_now()
+                     self.save_job(job)
+@@ -1206,6 +1580,14 @@
+         return changed
+ 
+     def poll_for_tab(self, tab_id: int, page_url: str) -> dict[str, Any] | None:
++        mode = str(self.rollout_state().get('mode') or ROLLOUT_OPEN)
++        if mode in (ROLLOUT_DRAIN, ROLLOUT_BARRIER):
++            # No new work is handed out and no new claim may be taken. Events
++            # for work already claimed still arrive through update_from_client,
++            # which is what lets a claimed delivery finish rather than being
++            # abandoned mid-flight.
++            self.recover_expired_leases()
++            return None
+         self.recover_expired_leases()
+         candidates: list[dict[str, Any]] = []
+         if not self.data_dir.is_dir():
+@@ -1233,7 +1615,13 @@
+                     continue
+                 if str(job.get('dispatchEpoch') or '') != self.dispatch_epoch:
+                     continue
+-                if self._lease_is_active(job):
++                kind, _detail = self.classify_lease(job)
++                if kind == self.LEASE_INVALID:
++                    # Contradictory lease evidence needs an operator, not
++                    # another client: offering the job would only produce a
++                    # claim that is refused for the same reason.
++                    continue
++                if kind == self.LEASE_ACTIVE:
+                     continue
+                 candidates.append(job)
+ 
+@@ -1254,6 +1642,15 @@
+                 raise DeliveryError('wrong tabId for delivery job')
+ 
+             event_type = str(body.get('event') or '')
++            if event_type == 'CLAIM':
++                # A new claim is new work. Refusing it only in poll_for_tab left
++                # the event route as a way to take one anyway, which is how a
++                # drain could still be handed fresh outstanding deliveries after
++                # it started. Checked before any job-specific validation, so an
++                # unrelated complaint cannot answer in its place.
++                mode = str(self.rollout_state().get('mode') or ROLLOUT_OPEN)
++                if mode != ROLLOUT_OPEN:
++                    raise DeliveryError(f'DELIVERY_CLAIM_REFUSED: rollout mode is {mode}')
+             now = utc_now()
+ 
+             if event_type == 'CLAIM':
+@@ -1262,8 +1659,24 @@
+                     raise DeliveryError('missing delivery lease token')
+ 
+                 current_token = str(job.get('claimLeaseToken') or '')
+-                if self._lease_is_active(job) and current_token != requested_token:
++                kind, detail = self.classify_lease(job)
++                if kind == self.LEASE_ACTIVE and current_token != requested_token:
+                     raise DeliveryError('delivery job is already leased')
++                if kind == self.LEASE_INVALID:
++                    # A fresh claim must not paper over a trace nobody could
++                    # explain: overwriting it would destroy the only record that
++                    # an outcome was lost.
++                    raise DeliveryError(f'DELIVERY_LEASE_INVALID: {detail}')
++                if kind == self.LEASE_EXPIRED:
++                    # Recovery must run first. poll_for_tab does it before
++                    # offering work, but a direct event call would otherwise
++                    # overwrite the expired trace and the lease term would stop
++                    # being a server-side boundary.
++                    self._latch_if_draining_reason(
++                        job, f"claim over an expired lease: run={job.get('runId')} "
++                             f"job={job.get('jobId')}")
++                    raise DeliveryError(
++                        'DELIVERY_LEASE_EXPIRED: recover the expired lease before claiming')
+ 
+                 job['claimLeaseToken'] = requested_token
+                 job['claimHeartbeatAt'] = now
+@@ -1315,6 +1728,13 @@
+                 job['sendError'] = body.get('error')
+                 if job['sendState'] == 'SENT':
+                     job['sentAt'] = now
++                    # The outcome is known, so the lease ends here, in the same
++                    # save. The browser sends RELEASE afterwards, but by then
++                    # the job is terminal and the early return ignores it — so
++                    # a perfectly ordinary successful send used to leave an
++                    # ACTIVE lease behind for ever, and the drain read that
++                    # terminal job as quiet.
++                    self._clear_lease(job)
+ 
+             elif event_type == 'ATTACHMENT_STATE':
+                 attachment_id = str(body.get('attachmentId') or '')
+@@ -1427,8 +1847,17 @@
+             job['sendError'] = None
+             return self.save_job(job)
+ 
+-    def attachment_chunk(self, run_id: str, job_id: str, attachment_id: str, offset: int, limit: int) -> dict[str, Any]:
++    def attachment_chunk(self, run_id: str, job_id: str, attachment_id: str, offset: int, limit: int,
++                         *, tab_id: int | None = None, lease_token: str = '') -> dict[str, Any]:
+         job = self.get_job(run_id, job_id)
++        if tab_id is not None:
++            target = job.get('target') if isinstance(job.get('target'), dict) else {}
++            if int(target.get('tabId') or -2) != int(tab_id):
++                raise DeliveryError('wrong tabId for delivery job')
++            # A live lease held by this caller. Reading bytes is work, and work
++            # requires a claim — otherwise a drain that hands out no new jobs
++            # still hands out new pieces of them.
++            self._touch_lease(job, lease_token)
+         attachment = next((x for x in job.get('attachments') or [] if x.get('attachmentId') == attachment_id), None)
+         if attachment is None:
+             raise DeliveryError('attachment not found')

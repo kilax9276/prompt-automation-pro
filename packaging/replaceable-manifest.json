@@ -1,0 +1,84 @@
+{
+  "files": [
+    {
+      "mode": "0644",
+      "path": "chat_bindings.py",
+      "sha256": "58c883c66ed8a168b3ec8bd17640d2faa0de9f764276d5623c0e04fc3bdff1eb",
+      "size": 8837
+    },
+    {
+      "mode": "0755",
+      "path": "console_server.py",
+      "sha256": "b313552f6d82eff3ca0f596681fcee63efa1d0193299e0793b718613cb5dda2c",
+      "size": 49035
+    },
+    {
+      "mode": "0644",
+      "path": "delivery_manager.py",
+      "sha256": "3fc3469a1219d646d5ac480fb314ddadfa9e2180ce2fdd45b12ef4cc3a02d3a4",
+      "size": 66259
+    },
+    {
+      "mode": "0644",
+      "path": "endpoint_registry.py",
+      "sha256": "8db5534d21e017c936887fbb9c72e4428449da96617c6300df98d53306580d8f",
+      "size": 11012
+    },
+    {
+      "mode": "0644",
+      "path": "execution_error_detector.py",
+      "sha256": "eb81b5c565767e3cd5fac72e186280d7d4dec563da14bb29670c699a1de39618",
+      "size": 4266
+    },
+    {
+      "mode": "0755",
+      "path": "executor.py",
+      "sha256": "f9092de771b693bd555c7b651758617186f9ad0830cb0f06549eeb75900f7ca7",
+      "size": 61233
+    },
+    {
+      "mode": "0644",
+      "path": "profile_resolver.py",
+      "sha256": "8a746fc11ea8325a52e1334e57705311c883ff913236cf940c6c4508434d3741",
+      "size": 4445
+    },
+    {
+      "mode": "0644",
+      "path": "profile_store.py",
+      "sha256": "6a1f5db725f23d2f0dd209681e0af3fe93b4609d0074214103f82174a8283bd2",
+      "size": 25321
+    },
+    {
+      "mode": "0755",
+      "path": "protocol_engine.py",
+      "sha256": "1ef2fd6684851d25d5826a757f44c9cfe570c7d79a3d861aad57e6a59337a9dd",
+      "size": 12295
+    },
+    {
+      "mode": "0644",
+      "path": "run_profile_context.py",
+      "sha256": "30409e1d3400c55424042eb55f1fc8fefc2de4d1e6f874dd40fd5c44f4a14ec4",
+      "size": 12956
+    },
+    {
+      "mode": "0644",
+      "path": "static/app.js",
+      "sha256": "e6d2fa5a19276f490b9b7cbad52813219767a140cd0270987454160a8e98f847",
+      "size": 88041
+    },
+    {
+      "mode": "0644",
+      "path": "static/index.html",
+      "sha256": "3f8bf767668161e33934defba41bfad59c9fd318d79c09f5a7dfd5cd2d67fe99",
+      "size": 16217
+    },
+    {
+      "mode": "0644",
+      "path": "static/style.css",
+      "sha256": "1dc41455e9d94f9ea59af1419264dc4f60fe4c3384a0bde126d61014623f0f28",
+      "size": 17017
+    }
+  ],
+  "release": "4.4.0",
+  "schemaVersion": 1
+}
