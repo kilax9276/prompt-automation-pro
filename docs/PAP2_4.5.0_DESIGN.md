@@ -258,6 +258,22 @@ tabEnabled = manual OR (аренд сессий больше нуля)
 перескочила бы на вторую вкладку той же переписки лишь потому, что сейчас она
 единственная на связи.
 
+Явный операторский выбор хранится только внутри `ProfileSession`:
+
+```
+endpointSelections[bindingId] = {
+  status: SELECTED,
+  bindingId, endpointId,
+  selectedAt, selectedBy, reason
+}
+```
+
+Это не снимок endpoint и не свойство ChatBinding. Существующая сессия без поля
+`endpointSelections` читается как пустая selection-state; старые pins и
+`approvedEndpointId` в неё не переносятся. Запись этой relation появляется в
+срезе 2 вместе с `selectEndpoint`; автоматическая политика чтения/переноса выбора
+в delivery-resolver остаётся обязанностью своего последующего среза.
+
 Выбора по наименьшему номеру вкладки или «первого попавшегося» нет ни на одной
 ступени.
 
@@ -2625,6 +2641,11 @@ Run без снимка и нет условий входа в срез 7 по �
 | 2026-09-08 | terminal replay отделяет persisted history от доставленного результата: SENT/CONSUMED и подтверждённый SENT/MANUAL_SENT остаются FOUND, доказанно недоставленный SUPERSEDED/CANCELLED (`NOT_REQUESTED`/`SEND_ERROR`) не закрывает source, а `SEND_REQUESTED` без исхода остаётся UNPROVABLE | существование job.json не доказывает, что recovery дошёл до чата; возврат недоставленного terminal replay как FOUND делал восстановление невозможным навсегда, а превращение незавершённого send-request в absence было бы столь же недоказанным |
 | 2026-09-08 | непригодный сохранённый status recovery replay — `UNPROVABLE`, а не truthy/string-coerced lifecycle | `status=42` проходил как FOUND, оставляя последнюю снисходительную ветку внутри helper'а |
 | 2026-09-08 | replay другого source пропускается только после проверки всей канонической writer-строки | ранний `recoveryOf != source` иначе снова превращает повреждённые `target`, `status` или `dispatchEpoch` в «не наш replay» и молча выносит их из доказательства |
+
+| 2026-09-08 | `selectEndpoint` сохраняет только relation `ProfileSession × bindingId → endpointId`; endpoint и ChatBinding остаются неизменными | явный выбор является серверным состоянием конкретной сессии, а не новым именем старого pin/approved свойства |
+| 2026-09-08 | перед записью `selectEndpoint` заново проверяет live session, enabled profile/binding и текущий ONLINE endpoint с совпадающими chatType/conversationId/projectId | HTTP-аутентификация оператора не доказывает право на конкретный устаревший или чужой endpoint; отказ обязан предшествовать записи |
+| 2026-09-08 | session без `endpointSelections` читается как пустая; pins/approved значения не мигрируют в relation | отсутствие нового поля у уже созданной session — совместимость формата, а не разрешение восстановить старую policy |
+| 2026-09-08 | `MAP-028` не переписывает `authorize_delivery` и `select_for_binding`; эти обязанности остаются у `MAP-018`/`MAP-034` | первая попытка шага 3 полезла в selection-policy среза 4; карта является границей объёма, поэтому преждевременная интеграция была откачена |
 
 ### Инвариант фикстур
 

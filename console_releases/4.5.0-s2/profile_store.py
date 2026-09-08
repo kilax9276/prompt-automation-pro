@@ -918,15 +918,81 @@ class ProfileActivationStore:
 
 
 class ProfileSessionStore:
-    """ProfileSession foundation. It deliberately has no endpoint/tab effects."""
+    """Persist ProfileSession state, including session-scoped endpoint choice.
+
+    Endpoint observation still belongs to EndpointRegistry.  The only browser
+    identity kept here is the relation chosen for one binding in one session;
+    no selection is ever written back onto an endpoint or ChatBinding.
+    """
 
     LIVE_STATES = {"STARTING", "RUNNING", "DEGRADED"}
+    SELECTION_SELECTED = "SELECTED"
 
     def __init__(self, root: Path, snapshots: ProfileSnapshotStore) -> None:
         self.root = root.resolve()
         self.sessions_root = self.root / "runtime" / "profile-sessions"
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         self.snapshots = snapshots
+
+
+    def _session_path(self, session_id: str) -> Path:
+        key = str(session_id or "").strip()
+        path = (self.sessions_root / key / "session.json").resolve()
+        if not key or path.parent.parent != self.sessions_root:
+            raise ProfileError("invalid sessionId")
+        return path
+
+    def get(self, session_id: str) -> dict[str, Any] | None:
+        path = self._session_path(session_id)
+        try:
+            row = json.loads(path.read_text("utf-8"))
+        except FileNotFoundError:
+            return None
+        except Exception as exc:
+            raise ProfileError(f"invalid profile session {session_id}: {exc}") from exc
+        if not isinstance(row, dict) or str(row.get("sessionId") or "") != str(session_id):
+            raise ProfileError(f"invalid profile session {session_id}")
+        selections = row.get("endpointSelections")
+        if selections is None:
+            row["endpointSelections"] = {}
+        elif not isinstance(selections, dict):
+            raise ProfileError(f"invalid endpointSelections in session {session_id}")
+        return row
+
+    def selection(self, session_id: str, binding_id: str) -> dict[str, Any] | None:
+        row = self.get(session_id)
+        if row is None:
+            return None
+        value = (row.get("endpointSelections") or {}).get(str(binding_id))
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ProfileError(f"invalid endpoint selection for binding {binding_id}")
+        return dict(value)
+
+    def select_endpoint(self, session_id: str, binding_id: str, endpoint_id: str, *, selected_by: str, reason: str) -> dict[str, Any]:
+        row = self.get(session_id)
+        if row is None:
+            raise ProfileError("profile session not found")
+        if str(row.get("state") or "") not in self.LIVE_STATES:
+            raise ProfileError("profile session is not live")
+        binding_key = str(binding_id or "").strip()
+        if binding_key not in {str(x) for x in row.get("bindingIds") or []}:
+            raise ProfileError("binding is not part of profile session")
+        value = {
+            "status": self.SELECTION_SELECTED,
+            "bindingId": binding_key,
+            "endpointId": str(endpoint_id),
+            "selectedAt": utc_now(),
+            "selectedBy": str(selected_by or "system"),
+            "reason": str(reason),
+        }
+        selections = dict(row.get("endpointSelections") or {})
+        selections[binding_key] = value
+        row["endpointSelections"] = selections
+        row["updatedAt"] = utc_now()
+        atomic_write_json(self._session_path(session_id), row, mode=0o640)
+        return dict(value)
 
     def list(self, profile_id: str | None = None) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -970,6 +1036,7 @@ class ProfileSessionStore:
             "profileDigest": snap["profileDigest"],
             "snapshotDigest": snap["snapshotDigest"],
             "bindingIds": sorted({str(x) for x in binding_ids if str(x)}),
+            "endpointSelections": {},
             "restartGeneration": int(restart_generation),
             "state": "STARTING",
             "createdAt": utc_now(),

@@ -1203,6 +1203,76 @@ class ConsoleServer:
             ), None)
         return web.json_response({"ok": True, **data})
 
+    async def api_select_endpoint(self, request: web.Request) -> web.Response:
+        """Select one endpoint for one binding in one live ProfileSession.
+
+        Request authentication is only the outer gate.  The session, profile,
+        binding and endpoint are re-read immediately before the write, and any
+        refusal occurs before session selection state is mutated.
+        """
+        self.require_auth(request)
+        session_id = str(request.match_info.get("session_id") or "").strip()
+        binding_id = str(request.match_info.get("binding_id") or "").strip()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        endpoint_id = str((body or {}).get("endpointId") or "").strip() if isinstance(body, dict) else ""
+        if not endpoint_id:
+            return web.json_response({"ok": False, "code": "ENDPOINT_ID_REQUIRED"}, status=400)
+
+        try:
+            session = self.sessions.get(session_id)
+            if session is None:
+                raise ProfileError("profile session not found")
+            if str(session.get("state") or "") not in self.sessions.LIVE_STATES:
+                raise ProfileError("profile session is not live")
+            if binding_id not in {str(x) for x in session.get("bindingIds") or []}:
+                raise ProfileError("binding is not part of profile session")
+
+            binding = self.bindings.get(binding_id)
+            if binding is None:
+                raise ProfileError("chat binding not found")
+            if not bool(binding.get("enabled")):
+                raise ProfileError("chat binding is disabled")
+            profile_id = str(session.get("profileId") or "")
+            if str(binding.get("profileId") or "") != profile_id:
+                raise ProfileError("binding does not belong to profile session")
+            profile = self.profiles.get_profile(profile_id, include_prompts=False)
+            if not bool(profile.get("enabled", True)):
+                raise ProfileError("profile is disabled")
+
+            endpoint = next((
+                row for row in self.endpoints.list().get("endpoints") or []
+                if str(row.get("endpointId") or "") == endpoint_id
+            ), None)
+            if endpoint is None:
+                raise EndpointError("endpoint not found")
+            if str(endpoint.get("state") or "") in {"CLOSED", "EXPIRED"}:
+                raise EndpointError("endpoint is terminal")
+            if not bool(endpoint.get("online")):
+                raise EndpointError("endpoint is OFFLINE")
+            if str(endpoint.get("chatType") or "") != str(binding.get("chatType") or ""):
+                raise EndpointError("endpoint chatType does not match binding")
+            if str(endpoint.get("conversationId") or "") != str(binding.get("conversationId") or ""):
+                raise EndpointError("endpoint conversationId does not match binding")
+            binding_project = str(binding.get("projectId") or "")
+            if binding_project and str(endpoint.get("projectId") or "") != binding_project:
+                raise EndpointError("endpoint projectId does not match binding")
+
+            relation = self.sessions.select_endpoint(
+                session_id, binding_id, endpoint_id,
+                selected_by=self._actor_name(request), reason="OPERATOR")
+        except (ProfileError, EndpointError) as exc:
+            return web.json_response({"ok": False, "code": "ENDPOINT_SELECTION_REFUSED",
+                                      "error": str(exc)}, status=409)
+
+        await self.publish({"type": "session:update", "sessionId": session_id,
+                            "bindingId": binding_id, "endpointId": endpoint_id})
+        return web.json_response({"ok": True, "sessionId": session_id,
+                                  "bindingId": binding_id, "endpointId": endpoint_id,
+                                  "selection": relation, "endpoint": endpoint})
+
     # api_endpoint_pin / api_endpoint_unpin removed in slice 2. Pinning an
     # endpoint is no longer an operation: selection is a session-binding
     # relation established by selectEndpoint, and leaving a route that can
@@ -1321,6 +1391,7 @@ def create_app(root: Path, data_dir: Path, token_file: Path) -> web.Application:
     app.router.add_put("/api/chat-bindings/{binding_id}", server.api_binding_update)
     app.router.add_delete("/api/chat-bindings/{binding_id}", server.api_binding_delete)
     app.router.add_get("/api/endpoints", server.api_endpoints)
+    app.router.add_post("/api/profile-sessions/{session_id}/bindings/{binding_id}/select-endpoint", server.api_select_endpoint)
     app.router.add_get("/api/config-history", server.api_config_history)
     app.router.add_get("/ws", server.websocket)
     app.on_startup.append(server.on_startup)

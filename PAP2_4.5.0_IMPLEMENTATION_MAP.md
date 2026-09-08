@@ -2,7 +2,7 @@
 
 Статус: **implementation map only**. Сервер/стенд не изменялись, сборка/активация не выполнялись. Основание: `Console 4.4.0 r7 + Extension 2.11.6 + receiver 2.10.0; git 830ab8c6453fa58ab1fd1339e210a41857e16df6`.
 
-- **Редакция дизайна:** `8b6475a283a850308e06903d3a537aba79242c0694e5e15cc0e3851120ca566f` / 2646 строк
+- **Редакция дизайна:** `1b3d806b53d92399dea48f8b9546ba2ddc6fba83a360bb9a746ea9735fd875e1` / 2667 строк
 - **Историческая точка 4.4.0:** `830ab8c6453fa58ab1fd1339e210a41857e16df6` — не заменяется никогда. Каталоги `console_releases/4.3.5`, `console_releases/4.4.0` и корневой `server.py` заморожены: срез 1 не правил их на месте, а создал свои каталоги релизов. Поэтому строки закрытых срезов не устаревают — байты, которые они описывают, не изменятся.
 - **Статусы якорей:** строка закрытого среза помечена `HISTORICAL` и по байтам не сверяется; строка будущего среза помечена `ACTIVE` и её якоря выпущены на рабочем основании.
 - **Рабочее основание:** три поддерева git, перечисленные ниже. Коммит здесь не называется намеренно: поддерево живёт дольше любого коммита, а объявленный номер коммита устаревает при первой же несвязанной правке и начинает описывать не то дерево, которое проверяется. Идентичность даёт git, а не собственный дайджест: он уже строит Merkle-дерево по всем байтам. Именно поддеревья, а не `HEAD` и не корневое дерево — несвязанный коммит вроде правки README сдвигает корень, не сдвигая ни одного якоря, и значение, требующее ручной правки при каждом таком коммите, перестаёт описывать дерево.
@@ -1417,6 +1417,21 @@
 - **Acceptance:** `ACC-S5-026`
 - **Откат:** Rollback вместе с атомарной границей блока 2+5.
 
+### MAP-088 — срез 2 — `console_releases/4.5.0-s1/profile_store.py` / `ProfileSessionStore`
+
+- **Статус якорей:** ACTIVE на рабочем основании closed-S1; путь основания `830ab8c6` был `console_releases/4.4.0/profile_store.py`.
+- **Релиз-основание:** Console 4.4.0 r7 + Extension 2.11.6 + receiver 2.10.0; git 830ab8c6453fa58ab1fd1339e210a41857e16df6
+- **Полный SHA-256:** `41302e1953f92e526f6abf676fe8992840ff6e8014d766cc0cd8a526780d3019`
+- **Точный диапазон:** `773–834`
+- **Текущая обязанность:** Хранит foundation ProfileSession: identity профиля/снимка, bindingIds, restartGeneration и lifecycle; endpoint/tab effects отсутствуют.
+- **Обязанность 4.5:** Добавить session-local `endpointSelections` и writer явного выбора `bindingId → endpointId` для `selectEndpoint`; существующая session без поля читается как пустая selection-state.
+- **Изменение:** добавление
+- **Контракты:** §4.8; §9a; §10i «Выбор endpoint — не переименование закрепления»
+- **Что менять нельзя:** Не копировать observed endpoint state и не писать `approvedEndpointId`/pin semantics; writer хранит только relation и audit (`selectedAt`, `selectedBy`, `reason`). Не реализовывать здесь автоматическую delivery selection policy `MAP-034`.
+- **Миграция:** Старые sessions получают пустое состояние чтением по умолчанию; legacy pins/approved values не переносятся.
+- **Acceptance:** `ACC-S2-007`
+- **Откат:** Rollback среза 2 игнорирует/удаляет session selection state вместе с новой endpoint-space; старые pins из него не восстанавливаются.
+
 ## 4. Миграция ломающих границ
 
 ### 4.1. Граница среза 2
@@ -1479,7 +1494,7 @@ Server endpoint ownership/registry, Extension endpointId/epoch/alarms и canonic
 | `ACC-S2-004` | ENDPOINT при отсутствии/истёкшем ownership получает NOT_CONTROL_OWNER до observe. | PLANNED |
 | `ACC-S2-005` | ENDPOINT чужой живой epoch получает CONTROL_AGENT_CONFLICT до observe. | PLANNED |
 | `ACC-S2-006` | Browser barrier отвергает old/fenced protocol до browser state mutation. | PLANNED |
-| `ACC-S2-007` | selectEndpoint(sessionId,bindingId,endpointId) делает live identity/auth check и не пишет approvedEndpointId. | PLANNED |
+| `ACC-S2-007` | selectEndpoint(sessionId,bindingId,endpointId) делает live identity/auth check и не пишет approvedEndpointId. | PASS |
 | `ACC-S2-008` | Legacy pin/unpin/approved semantics не используются в 4.5 и не мигрируют в selection. | PLANNED |
 | `ACC-S2-009` | Page reload сохраняет endpointId в той же browserEpoch. | PLANNED |
 | `ACC-S2-010` | Late pulse после CLOSED не воскрешает endpoint. | PLANNED |
@@ -1708,7 +1723,7 @@ Server endpoint ownership/registry, Extension endpointId/epoch/alarms и canonic
 - historical git HEAD: `830ab8c6453fa58ab1fd1339e210a41857e16df6` — историческая точка 4.4.0, не рабочее основание
 - рабочее основание: три поддерева git, объявлены в §1 и сверяются с репозиторием
 - файлов основания: **18**
-- точек врезки/guard rows: **87**
+- точек врезки/guard rows: **88**
 - acceptance definitions: **127**
 - `verify_map.py` сверяет эти числа с фактическим содержимым карты: расхождение означает, что самосводку не обновили после правки.
 - Рабочее основание пересчитывается после каждого формально закрытого среза. `830ab8c6…` остаётся исторической точкой 4.4.0 и не является рабочим основанием следующего среза после закрытия предыдущего.
