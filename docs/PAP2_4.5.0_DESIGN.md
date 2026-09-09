@@ -1973,7 +1973,24 @@ endpoint уже CLOSED или EXPIRED  идемпотентно, ничего н
 ```
 
 Так правило «состояние браузера меняет только текущий владелец» получает
-проверяемую форму.
+проверяемую форму. Серверная половина этого правила является отдельной
+control-plane операцией браузера, а не событием delivery job:
+
+```
+POST /api/endpoints/close
+  extensionVersion=2.12.0
+  browserEpoch=<current epoch>
+  endpointId=<endpoint being closed>
+```
+
+До изменения endpoint-state сервер проверяет bearer-auth, точную версию
+протокола и текущее CONTROL ownership; затем доказывает, что endpointId
+принадлежит той же browserEpoch. Чужая или уже потерявшая владение эпоха не
+меняет endpoint. Повторный close для `CLOSED`, а также close уже `EXPIRED`
+идемпотентны и не переписывают terminal row. Операция не меняет delivery jobs
+и остаётся доступной при delivery `BARRIER`: закрытие browser endpoints входит
+в достижение/сохранение тишины и не должно блокироваться самой границей
+доставки.
 
 ### Четыре семейства маршрутов
 
@@ -2660,6 +2677,7 @@ Run без снимка и нет условий входа в срез 7 по �
 | 2026-09-08 | bundle provenance хранит ordered `sourceArtifactIds`; для terminal log не синтезируется фиктивный artifact-store id | один outgoing archive может происходить из нескольких report artifacts, а выдуманный singular artifactId терял бы происхождение |
 | 2026-09-08 | нулевой attachment size является каноническим значением и не подменяется `-1` truthiness-fallback | пустой файл — законный артефакт; `0` не означает отсутствие размера |
 | 2026-09-08 | S4 supersede сравнивает пару logicalDeliveryId/sideEffectKey и сохраняет S2 lease/single-flight interlock | две независимые доставки в один conversation должны пережить Prepare друг друга, но browser plane всё ещё не исполняет их одновременно |
+| 2026-09-09 | `tabs.onRemoved → CLOSED` имеет явную server control-plane операцию `/api/endpoints/close`; она требует browser auth, version 2.12.0, текущего CONTROL owner и endpoint той же epoch, остаётся доступной в delivery BARRIER и не меняет delivery jobs | внутреннего `EndpointRegistry.close()` недостаточно: без HTTP-маршрута расширение не могло выполнить MAP-053 вообще, а изображать CLOSED обычным ENDPOINT heartbeat означало бы записать ONLINE |
 
 ### Инвариант фикстур
 

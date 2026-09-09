@@ -918,15 +918,16 @@ class ConsoleServer:
 
     # ---- browser protocol barrier ----------------------------------------
 
-    def _browser_barrier(self, request: web.Request, *, require_endpoint: bool):
-        """Settle version, epoch, ownership and endpoint state before mutation.
+    def _browser_owner_barrier(self, request: web.Request, *, record_version_mismatch: bool = True):
+        """Prove browser protocol version and CONTROL ownership before product mutation.
 
-        Shared by every route the browser can reach. Duplicating the checks per
-        route is how one of them ends up missing a check and becomes a way
-        around all the others — the delivery event route was exactly that: no
-        version gate, no epoch, no ownership, straight into delivery state.
-
-        Returns a validated context, or a web.Response to send back untouched.
+        A version mismatch may still update its dedicated diagnostic record;
+        endpoint and delivery state remain untouched on every refusal.  This is
+        the common control-plane prefix for browser operations.  It is
+        intentionally separate from the delivery rollout barrier: terminal
+        endpoint cleanup must remain possible while delivery is in BARRIER,
+        otherwise the operation used to reach quiescence would itself be
+        disabled by quiescence.
         """
         query = request.rel_url.query
         extension_version = str(query.get("extensionVersion") or "").strip()
@@ -934,10 +935,11 @@ class ConsoleServer:
         endpoint_id = str(query.get("endpointId") or "").strip()
 
         if extension_version != REQUIRED_EXTENSION_VERSION:
-            self._record_version_mismatch(expected=REQUIRED_EXTENSION_VERSION,
-                                          observed=extension_version or None,
-                                          endpoint_id=endpoint_id or None,
-                                          browser_epoch=browser_epoch or None)
+            if record_version_mismatch:
+                self._record_version_mismatch(expected=REQUIRED_EXTENSION_VERSION,
+                                              observed=extension_version or None,
+                                              endpoint_id=endpoint_id or None,
+                                              browser_epoch=browser_epoch or None)
             return None, web.json_response(
                 {"ok": False, "code": "EXTENSION_VERSION_INCOMPATIBLE",
                  "expected": REQUIRED_EXTENSION_VERSION, "observed": extension_version or None},
@@ -953,6 +955,22 @@ class ConsoleServer:
         if not control.get("owner"):
             return None, web.json_response({"ok": False, "code": "NOT_CONTROL_OWNER",
                                             "browserEpoch": browser_epoch}, status=409)
+        return {"browserEpoch": browser_epoch, "endpointId": endpoint_id or None}, None
+
+    def _browser_barrier(self, request: web.Request, *, require_endpoint: bool):
+        """Settle owner, rollout and endpoint state before delivery mutation.
+
+        Shared by every delivery route the browser can reach. Duplicating the
+        checks per route is how one of them ends up missing a check and becomes
+        a way around all the others.
+
+        Returns a validated context, or a web.Response to send back untouched.
+        """
+        ctx, refusal = self._browser_owner_barrier(request)
+        if refusal is not None:
+            return None, refusal
+        browser_epoch = str(ctx.get("browserEpoch") or "")
+        endpoint_id = str(ctx.get("endpointId") or "")
 
         rollout = self.delivery.rollout_state()
         if not rollout.get("valid", True):
@@ -1268,6 +1286,43 @@ class ConsoleServer:
             ), None)
         return web.json_response({"ok": True, **data})
 
+    async def api_endpoint_close(self, request: web.Request) -> web.Response:
+        """Terminally close one endpoint for the current CONTROL owner.
+
+        This is browser control-plane state, not a delivery event.  Version and
+        ownership are proven before the endpoint row is examined, and every
+        refusal precedes the terminal write.  CLOSED/EXPIRED rows are returned
+        unchanged so repeated tab-close delivery is idempotent.
+        """
+        self.require_auth(request)
+        ctx, refusal = self._browser_owner_barrier(request, record_version_mismatch=False)
+        if refusal is not None:
+            return refusal
+
+        endpoint_id = str(request.rel_url.query.get("endpointId") or "").strip()
+        if not endpoint_id:
+            return web.json_response({"ok": False, "code": "ENDPOINT_ID_REQUIRED"}, status=400)
+        browser_epoch = str(ctx.get("browserEpoch") or "")
+
+        row = next((e for e in self.endpoints.list().get("endpoints") or []
+                    if str(e.get("endpointId") or "") == endpoint_id), None)
+        if row is None:
+            return web.json_response({"ok": False, "code": "ENDPOINT_UNKNOWN",
+                                      "endpointId": endpoint_id}, status=409)
+        if str(row.get("browserEpoch") or "") != browser_epoch:
+            return web.json_response({"ok": False, "code": "ENDPOINT_EPOCH_MISMATCH",
+                                      "endpointId": endpoint_id}, status=409)
+
+        try:
+            endpoint = self.endpoints.close(endpoint_id, browser_epoch)
+        except EndpointError as exc:
+            # The preflight above and close() execute without an await in one
+            # event-loop turn.  This is still fail-closed if persisted state is
+            # externally replaced between the two reads.
+            return web.json_response({"ok": False, "code": "ENDPOINT_CLOSE_REFUSED",
+                                      "error": str(exc)}, status=409)
+        return web.json_response({"ok": True, "endpoint": endpoint})
+
     async def api_select_endpoint(self, request: web.Request) -> web.Response:
         """Select one endpoint for one binding in one live ProfileSession.
 
@@ -1456,6 +1511,7 @@ def create_app(root: Path, data_dir: Path, token_file: Path) -> web.Application:
     app.router.add_put("/api/chat-bindings/{binding_id}", server.api_binding_update)
     app.router.add_delete("/api/chat-bindings/{binding_id}", server.api_binding_delete)
     app.router.add_get("/api/endpoints", server.api_endpoints)
+    app.router.add_post("/api/endpoints/close", server.api_endpoint_close)
     app.router.add_post("/api/profile-sessions/{session_id}/bindings/{binding_id}/select-endpoint", server.api_select_endpoint)
     app.router.add_get("/api/config-history", server.api_config_history)
     app.router.add_get("/ws", server.websocket)

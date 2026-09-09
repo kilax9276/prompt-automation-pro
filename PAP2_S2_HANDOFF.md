@@ -1,8 +1,8 @@
-# PAP2 4.5.0 — передача работы: срез 2, шаг 4 / S4 delivery semantics
+# PAP2 4.5.0 — передача работы: срез 2, server correction для endpoint CLOSED
 
-Документ самодостаточен. Новый чат может продолжить работу, не читая исходную
-переписку и не получая отдельных файлов: весь новый код среза 2 приведён здесь
-дословно, остальное описано с точными хэшами и лежит в приложенном архиве.
+Документ самодостаточен вместе с приложенным полным деревом. Авторитетны
+фактические исходники, карта и дизайн в дереве; большие встроенные фрагменты ниже
+сохраняют исторический контекст предыдущих раундов и не заменяют source files.
 
 ---
 
@@ -16,11 +16,12 @@
 Идёт разработка релиза **4.5.0**, разбитого на семь срезов. Каждый срез
 самостоятельно проверяем и самостоятельно откатываем.
 
-**Непосредственная цель сейчас** — независимо проверить шаг 4: окончательную
-семантику доставки среза 4 (`MAP-018`, `MAP-034`, `MAP-035`, `MAP-036`) поверх
-опубликованного шага 3. Это re-authorization через совместимую ProfileSession,
-endpoint selection policy, immutable delivery manifest и logical-delivery
-supersession. Commit/rollout этого шага до независимого CLEAN запрещены.
+**Непосредственная цель сейчас** — независимо проверить минимальную server-side
+коррекцию, необходимую для `MAP-053`: browser control-plane route terminal
+endpoint close. S4 уже получил независимый CLEAN, зафиксирован и опубликован как
+`04182769f2554483c90162cdd02c9c1c5433304c` на `s2-block25`; `main` не сдвинут,
+rollout отсутствует. Коррекция добавляет `MAP-089`/`ACC-S2-038` и не начинает
+extension implementation до отдельного CLEAN.
 
 Срез 2 — первая по-настоящему атомарная граница: сервер и расширение
 выкатываются только вместе и откатываются только вместе.
@@ -72,7 +73,7 @@ aa6aa61  Add 4.5.0 design document
 `ProfileSession × ChatBinding`, legacy pin/approved state не мигрирует.
 `ACC-S2-007=PASS`, `ACC-S2-008` остаётся `PLANNED`. Выката нет.
 
-### Срез 2, шаг 4 — S4 delivery semantics, текущий review-кандидат
+### Срез 2, шаг 4 — S4 delivery semantics, CLEAN и опубликован
 
 Реализованы все четыре обязанности S4:
 
@@ -99,9 +100,31 @@ endpoint. Также закреплены нулевые attachments и immutabl
 
 Текущий regression-файл `tests/test_slice4_delivery_semantics.py` содержит
 23 теста. На точных байтах MAP-028 Review 2 он должен быть RED; на кандидате —
-23 PASS. Полный набор на текущем дереве: `274 passed, 64 subtests`;
-verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `214/0 VERIFIED_CLEAN`.
-`ACC-S4-001…008=PASS`. Commit, push нового S4 commit и rollout не выполнялись.
+23 PASS. Полный набор на текущем дереве: `283 passed, 64 subtests`;
+verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `216/0 VERIFIED_CLEAN`.
+`ACC-S4-001…008=PASS`. Development-коммит `04182769f2554483c90162cdd02c9c1c5433304c` опубликован в `origin/s2-block25`; rollout не выполнялся.
+
+### Текущий server correction — endpoint CLOSED route
+
+При подготовке extension 2.12.0 обнаружен cross-layer blocker: `MAP-053` требует
+`tabs.onRemoved → CLOSED`, но S4 сервер имел только внутренний
+`EndpointRegistry.close()` без browser HTTP operation. Обычный ENDPOINT poll
+использовать нельзя: он означает observe/ONLINE.
+
+Кандидат добавляет `POST /api/endpoints/close` с обязательными
+`extensionVersion=2.12.0`, `browserEpoch`, `endpointId`. Bearer auth и текущее
+CONTROL ownership проверяются до endpoint mutation; endpoint обязан принадлежать
+той же epoch. Foreign/non-owner отказан без изменения endpoint row. `CLOSED` и
+`EXPIRED` terminal/idempotent. Route не меняет delivery jobs и остаётся доступным
+при delivery `BARRIER`.
+
+Новая строка карты `MAP-089`, server-code acceptance `ACC-S2-038=PASS`;
+end-to-end `ACC-S2-020/021` остаются `PLANNED` до extension-side реализации.
+Новый `tests/test_slice2_endpoint_close_route.py`: 9 PASS на кандидате и 9 FAIL
+на точном S4 Review 2 baseline, где handler отсутствует.
+
+Полный набор кандидата: `283 passed, 64 subtests`; verify_inventory `177/0`,
+verify_overlaps `10/0`, verify_map `216/0 VERIFIED_CLEAN`.
 
 Содержание уже закрытого блока 2+5:
 
@@ -124,7 +147,7 @@ verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `214/0 VERIFIED_CLE
 console_releases/4.5.0-s2/endpoint_registry.py
   99b085d3ff28deced65ce207167ecb4e47e40dd864acd0bd57d3899a8f484ed2
 console_releases/4.5.0-s2/console_server.py
-  9406472c9a2f5eaafe641628fbd68eec2f4feff5ac1f4918d37667168da97b74
+  7914c50c0ea5f2973f77708e729d15cba7c3e1ea6d97e9a681f8d96560af9636
 console_releases/4.5.0-s2/delivery_manager.py
   0b56eb9687feb52ccb4022bddabc16d3910db27e1d04ae93c0aeec700e56ce42
 console_releases/4.5.0-s2/profile_store.py
@@ -161,9 +184,9 @@ extension  extension_releases/2.11.6     65b0db4ed31d36f68bb3f6b832797d4e524edeb
 ### Карта реализации и дизайн
 
 ```
-PAP2_4.5.0_IMPLEMENTATION_MAP.md   88 строк MAP
+PAP2_4.5.0_IMPLEMENTATION_MAP.md   89 строк MAP
                                    127 acceptance
-docs/PAP2_4.5.0_DESIGN.md          2681 строк, журнал решений включён
+docs/PAP2_4.5.0_DESIGN.md          2699 строк, журнал решений включён
 цепочка проверки                   verify_inventory 177/0, verify_overlaps 10/0, verify_map 214/0
 ```
 
@@ -2312,7 +2335,7 @@ packaging/                      установщик релиза и маниф�
 
 tests/                          270 тестов, включая S4 delivery regressions
 diff/                           три патча относительно коммита 8fc773c
-docs/PAP2_4.5.0_DESIGN.md       дизайн, 2667 строк, журнал решений
+docs/PAP2_4.5.0_DESIGN.md       дизайн, 2699 строк, журнал решений
 PAP2_4.5.0_IMPLEMENTATION_MAP.md   карта точек врезки
 tools/                          цепочка проверки карты, пути относительные
 
@@ -2510,35 +2533,28 @@ review 14 только что принятому инварианту и неэ�
 
 ## 8. Следующий шаг
 
-Порядок работ по срезу 2, с текущей позицией:
+Порядок с текущей позицией:
 
 ```
-шаг 1   переименование timeout                    ЗАКРЫТ, коммит 8fc773c
-шаг 2+5 модель endpoint, владение, барьеры,
-        DRAIN/BARRIER                             ЗАКРЫТ ПО КОДУ, коммит d943c11
-шаг 3   selectEndpoint, привязка сессии           ЗАКРЫТ, коммит b7d39e3
-шаг 4   семантика доставки и слива                ← ЗДЕСЬ, независимый review
-шаг 6   эпохи и управляющий агент в расширении
-шаг 7   мост ENDPOINT и обратный забор
-шаг 8   интеграция выката и миграции
+шаг 1   timeout migration                         ЗАКРЫТ, 8fc773c
+шаг 2+5 endpoint/ownership/barriers              ЗАКРЫТ ПО КОДУ, d943c11
+шаг 3   selectEndpoint                            ЗАКРЫТ, b7d39e3
+шаг 4   S4 delivery semantics                     ЗАКРЫТ, 0418276, CLEAN
+коррекция server endpoint CLOSED route           ← ЗДЕСЬ, независимый review
+шаг 6   epochs/control agent + heartbeat extension
+шаг 7   ENDPOINT bridge / reverse delivery
+шаг 8   controlled rollout/live acceptance
 ```
 
-**Немедленно:** независимо проверить текущий S4 Review 2 кандидат (`MAP-018`,
-`MAP-034`, `MAP-035`, `MAP-036`) на точных байтах пакета. Review 1 получил
-CHANGES REQUESTED не по продукту, а по доказательству: при адаптации старых
-тестов к logical-delivery supersede были утрачены три fail-closed оси Review 27
-и одна ось Review 26. В Review 2 они восстановлены через writer-produced
-same-logical supersede; S4 production bytes не менялись. Причинный RED-before
-для самого S4 по-прежнему выполняется тем же `test_slice4_delivery_semantics.py`
-на MAP-028 Review 2.
+**Немедленно:** независимо проверить server correction `MAP-089`/`ACC-S2-038`.
+До CLEAN не коммитить и не push'ить correction, не менять `main`, не делать
+rollout и не устанавливать неполный extension 2.12.0.
 
-**После CLEAN:** зафиксировать шаг 4 отдельным development-коммитом на ветке
-`s2-block25` поверх `b7d39e350cf47f7b3ef6d6a34f63990f839257db`, без выката, затем
-опубликовать только эту ветку. `main` и работающий стенд pro2 остаются на срезе 1.
-
-**Затем:** перейти к следующей строке утверждённого порядка. `MAP-018`/`MAP-034`
-входят в текущий шаг 4; не захватывать сюда `MAP-049`/`MAP-050`
-(binding/resolver schema cleanup) и обязанности шагов 6–8.
+**После CLEAN:** зафиксировать correction отдельным development-коммитом на
+`s2-block25` поверх `04182769f2554483c90162cdd02c9c1c5433304c`, опубликовать
+только ветку, затем вернуться к extension Step 6 correction: heartbeat cadence
+с catch-up, portable regression и `tabs.onRemoved` вызов нового close route.
+`MAP-049/050` по-прежнему не входят в эту коррекцию.
 
 ---
 
@@ -2562,7 +2578,7 @@ bash RUN_TESTS.sh
 cd tools && python3 verify_inventory.py && python3 verify_overlaps.py && python3 verify_map.py
 ```
 
-Ожидается `274 passed, 64 subtests passed`; verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `214/0 VERIFIED_CLEAN`.
+Ожидается `274 passed, 64 subtests passed`; verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `216/0 VERIFIED_CLEAN`.
 
 Дерево полное: тесты, проверка карты, запуск платформы, выкат и откат среза 1,
 живой smoke. Порядок команд для каждого — в `ENVIRONMENT.md`. В архиве
