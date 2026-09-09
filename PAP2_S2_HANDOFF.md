@@ -1,4 +1,4 @@
-# PAP2 4.5.0 — передача работы: срез 2, server correction для endpoint CLOSED
+# PAP2 4.5.0 — передача работы: срез 2, CONTROL_AGENT reconciliation-plan correction
 
 Документ самодостаточен вместе с приложенным полным деревом. Авторитетны
 фактические исходники, карта и дизайн в дереве; большие встроенные фрагменты ниже
@@ -17,11 +17,13 @@
 самостоятельно проверяем и самостоятельно откатываем.
 
 **Непосредственная цель сейчас** — независимо проверить минимальную server-side
-коррекцию, необходимую для `MAP-053`: browser control-plane route terminal
-endpoint close. S4 уже получил независимый CLEAN, зафиксирован и опубликован как
-`04182769f2554483c90162cdd02c9c1c5433304c` на `s2-block25`; `main` не сдвинут,
-rollout отсутствует. Коррекция добавляет `MAP-089`/`ACC-S2-038` и не начинает
-extension implementation до отдельного CLEAN.
+коррекцию `CONTROL_AGENT reconciliation plan`, необходимую для честной реализации
+extension `MAP-052/055`. S4 и endpoint-CLOSED correction уже CLEAN, зафиксированы
+и опубликованы; текущий tip `s2-block25` =
+`86dc3b8d03b3c0841c103caed2d8c732d1494994`. `main` не сдвинут, rollout
+отсутствует. Текущий кандидат добавляет `MAP-090`, переводит `ACC-S2-002/003` в
+PASS и добавляет `ACC-S2-039=PASS`; extension implementation не начинается до
+отдельного CLEAN.
 
 Срез 2 — первая по-настоящему атомарная граница: сервер и расширение
 выкатываются только вместе и откатываются только вместе.
@@ -100,8 +102,8 @@ endpoint. Также закреплены нулевые attachments и immutabl
 
 Текущий regression-файл `tests/test_slice4_delivery_semantics.py` содержит
 23 теста. На точных байтах MAP-028 Review 2 он должен быть RED; на кандидате —
-23 PASS. Полный набор на текущем дереве: `283 passed, 64 subtests`;
-verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `216/0 VERIFIED_CLEAN`.
+23 PASS. Полный набор принятого S4 Review 2: `274 passed, 64 subtests`;
+verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `214/0 VERIFIED_CLEAN`.
 `ACC-S4-001…008=PASS`. Development-коммит `04182769f2554483c90162cdd02c9c1c5433304c` опубликован в `origin/s2-block25`; rollout не выполнялся.
 
 ### Текущий server correction — endpoint CLOSED route
@@ -123,8 +125,36 @@ end-to-end `ACC-S2-020/021` остаются `PLANNED` до extension-side ре�
 Новый `tests/test_slice2_endpoint_close_route.py`: 9 PASS на кандидате и 9 FAIL
 на точном S4 Review 2 baseline, где handler отсутствует.
 
-Полный набор кандидата: `283 passed, 64 subtests`; verify_inventory `177/0`,
+Полный набор endpoint-CLOSED кандидата: `283 passed, 64 subtests`; verify_inventory `177/0`,
 verify_overlaps `10/0`, verify_map `216/0 VERIFIED_CLEAN`.
+
+Endpoint-CLOSED correction после независимого CLEAN зафиксирован как
+`86dc3b8d03b3c0841c103caed2d8c732d1494994` и опубликован в `origin/s2-block25`;
+`main` и стенд не менялись.
+
+### Текущий server correction — CONTROL_AGENT reconciliation plan
+
+При подготовке extension Package 1 обнаружено, что `CONTROL_AGENT` умеет только
+арбитрировать ownership/lease, но не возвращает authoritative plan для
+`profile-session:<sessionId>` reasons. Это делает `MAP-052/055` неисполнимыми без
+подмены source-of-truth local cache или endpoint observation.
+
+Кандидат добавляет строгий `_build_reconcile_plan()`. Он перечисляет каждую
+сохранённую ProfileSession через strict `get()`, а не presentation `list()`,
+включает только `STARTING/RUNNING/DEGRADED`, проверяет единственность live session
+на profile и связывает только enabled bindings той же profile. Missing/deleted
+и disabled binding не создают reason. Malformed/ambiguous persisted state даёт
+`RECONCILE_PLAN_UNPROVABLE` whole-plan без частичного ответа.
+
+Plan canonical: sessions сортируются по `sessionId`, bindings по `bindingId`,
+`revision` — `sha256:` от canonical JSON без самого revision. Plan read-only по
+ProfileSession/ChatBinding. Конфликтующая epoch по-прежнему получает
+`CONTROL_AGENT_CONFLICT` без plan и без mutation.
+
+Новая строка карты `MAP-090`; `ACC-S2-002=PASS`, `ACC-S2-003=PASS`,
+`ACC-S2-039=PASS`. Новый `tests/test_slice2_reconcile_plan.py`: 13 PASS на
+кандидате. Полный набор: `296 passed, 64 subtests`; verify_inventory `177/0`,
+verify_overlaps `10/0`, verify_map `218/0 VERIFIED_CLEAN`.
 
 Содержание уже закрытого блока 2+5:
 
@@ -2578,7 +2608,7 @@ bash RUN_TESTS.sh
 cd tools && python3 verify_inventory.py && python3 verify_overlaps.py && python3 verify_map.py
 ```
 
-Ожидается `274 passed, 64 subtests passed`; verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `216/0 VERIFIED_CLEAN`.
+Ожидается `274 passed, 64 subtests passed`; verify_inventory `177/0`, verify_overlaps `10/0`, verify_map `218/0 VERIFIED_CLEAN`.
 
 Дерево полное: тесты, проверка карты, запуск платформы, выкат и откат среза 1,
 живой smoke. Порядок команд для каждого — в `ENVIRONMENT.md`. В архиве

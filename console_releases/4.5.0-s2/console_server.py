@@ -22,7 +22,7 @@ from aiohttp import WSMsgType, web
 from executor import RunExecutor, StepError
 from delivery_manager import DeliveryError, DeliveryManager
 from protocol_engine import parse_user_action_payload
-from profile_store import ProfileActivationStore, ProfileError, ProfileSessionStore, ProfileSnapshotStore, ProfileStore, atomic_write_json
+from profile_store import ProfileActivationStore, ProfileError, ProfileSessionStore, ProfileSnapshotStore, ProfileStore, atomic_write_json, canonical_json_bytes, sha256_prefixed
 from chat_bindings import ChatBindingError, ChatBindingsStore
 from endpoint_registry import EndpointError, EndpointRegistry
 from run_profile_context import ProfileAuthorizationError, RunProfileContext
@@ -1007,6 +1007,150 @@ class ConsoleServer:
                                             "state": row.get("state")}, status=409)
         return {"browserEpoch": browser_epoch, "endpointId": endpoint_id, "endpoint": row}, None
 
+    def _build_reconcile_plan(self) -> dict[str, Any]:
+        """Build the authoritative, read-only ProfileSession reconciliation plan.
+
+        The browser may cache profile-session reasons, but cannot reconstruct
+        them from endpoint observation or legacy tab state.  This reader is
+        deliberately strict: a persisted session or binding that cannot be
+        proved makes the whole plan unavailable rather than disappearing from
+        a partial answer.
+        """
+        live_states = set(self.sessions.LIVE_STATES)
+        allowed_states = live_states | {"STOPPED"}
+
+        # Do not use ProfileSessionStore.list(): that presentation helper
+        # intentionally skips unreadable rows.  A reconciliation plan may not
+        # turn corruption into absence.
+        sessions: list[dict[str, Any]] = []
+        live_by_profile: dict[str, str] = {}
+        for entry in sorted(self.sessions.sessions_root.iterdir(), key=lambda x: x.name):
+            if not entry.is_dir():
+                continue
+            session_path = entry / "session.json"
+            if not session_path.is_file():
+                raise ProfileError(f"profile session row missing: {entry.name}")
+            session_id = entry.name
+            row = self.sessions.get(session_id)
+            if row is None:
+                raise ProfileError(f"profile session disappeared during reconcile: {session_id}")
+            if type(row.get("schemaVersion")) is not int or row.get("schemaVersion") != 1:
+                raise ProfileError(f"invalid profile session schema {session_id}")
+            profile_value = row.get("profileId")
+            if not isinstance(profile_value, str) or not profile_value.strip():
+                raise ProfileError(f"profile session missing profileId {session_id}")
+            profile_id = profile_value.strip()
+            state_value = row.get("state")
+            if not isinstance(state_value, str):
+                raise ProfileError(f"invalid profile session state {session_id}: MISSING")
+            state = state_value.strip()
+            if state not in allowed_states:
+                raise ProfileError(f"invalid profile session state {session_id}: {state or 'MISSING'}")
+            binding_ids = row.get("bindingIds")
+            if not isinstance(binding_ids, list):
+                raise ProfileError(f"invalid bindingIds in session {session_id}")
+            if any(not isinstance(x, str) or not x.strip() for x in binding_ids):
+                raise ProfileError(f"invalid bindingIds in session {session_id}")
+            normalized_ids = [x.strip() for x in binding_ids]
+            if len(set(normalized_ids)) != len(normalized_ids):
+                raise ProfileError(f"invalid bindingIds in session {session_id}")
+            restart_generation = row.get("restartGeneration")
+            if type(restart_generation) is not int or restart_generation < 0:
+                raise ProfileError(f"invalid restartGeneration in session {session_id}")
+
+            if state not in live_states:
+                continue
+            prior = live_by_profile.get(profile_id)
+            if prior is not None:
+                raise ProfileError(f"multiple live sessions for profile {profile_id}: {prior}, {session_id}")
+            live_by_profile[profile_id] = session_id
+            sessions.append({
+                "sessionId": session_id,
+                "profileId": profile_id,
+                "restartGeneration": restart_generation,
+                "bindingIds": normalized_ids,
+            })
+
+        try:
+            raw_bindings = self.bindings.list()
+        except ChatBindingError as exc:
+            raise ProfileError(f"reconciliation bindings unavailable: {exc}") from exc
+
+        bindings_by_id: dict[str, dict[str, Any]] = {}
+        identities: dict[tuple[str, str], str] = {}
+        for raw in raw_bindings:
+            if not isinstance(raw, dict):
+                raise ProfileError("invalid chat binding row")
+            binding_value = raw.get("bindingId")
+            profile_value = raw.get("profileId")
+            chat_value = raw.get("chatType")
+            conversation_value = raw.get("conversationId")
+            project_value = raw.get("projectId")
+            enabled = raw.get("enabled")
+            if (not isinstance(binding_value, str) or not binding_value.strip()
+                    or not isinstance(profile_value, str) or not profile_value.strip()
+                    or not isinstance(chat_value, str)
+                    or chat_value.strip() not in {"chatgpt", "claude"}
+                    or not isinstance(conversation_value, str) or not conversation_value.strip()
+                    or project_value is not None and not isinstance(project_value, str)
+                    or isinstance(project_value, str) and not project_value.strip()
+                    or not isinstance(enabled, bool)):
+                raise ProfileError(f"invalid chat binding {binding_value if isinstance(binding_value, str) else 'MISSING'}")
+            binding_id = binding_value.strip()
+            profile_id = profile_value.strip()
+            chat_type = chat_value.strip()
+            conversation_id = conversation_value.strip()
+            project_id = project_value.strip() if isinstance(project_value, str) else None
+            if binding_id in bindings_by_id:
+                raise ProfileError(f"duplicate chat binding {binding_id}")
+            identity = (chat_type, conversation_id)
+            prior_identity = identities.get(identity)
+            if prior_identity is not None:
+                raise ProfileError(f"ambiguous chat binding identity {chat_type}:{conversation_id}: {prior_identity}, {binding_id}")
+            identities[identity] = binding_id
+            bindings_by_id[binding_id] = {
+                "bindingId": binding_id,
+                "profileId": profile_id,
+                "chatType": chat_type,
+                "conversationId": conversation_id,
+                "projectId": project_id,
+                "enabled": enabled,
+            }
+
+        plan_sessions: list[dict[str, Any]] = []
+        for session in sessions:
+            plan_bindings: list[dict[str, Any]] = []
+            for binding_id in sorted(session.pop("bindingIds")):
+                binding = bindings_by_id.get(binding_id)
+                if binding is None:
+                    # A binding may be explicitly deleted after a session was
+                    # created.  Absence is known and therefore creates no
+                    # browser reason.
+                    continue
+                if binding["profileId"] != session["profileId"]:
+                    raise ProfileError(
+                        f"binding {binding_id} profileId does not match session {session['sessionId']}")
+                if not binding["enabled"]:
+                    continue
+                plan_bindings.append({
+                    "bindingId": binding["bindingId"],
+                    "chatType": binding["chatType"],
+                    "conversationId": binding["conversationId"],
+                    "projectId": binding["projectId"],
+                    "enabled": True,
+                })
+            plan_sessions.append({
+                "sessionId": session["sessionId"],
+                "profileId": session["profileId"],
+                "restartGeneration": session["restartGeneration"],
+                "bindings": plan_bindings,
+            })
+
+        plan_sessions.sort(key=lambda x: str(x["sessionId"]))
+        material = {"sessions": plan_sessions}
+        return {"revision": sha256_prefixed(canonical_json_bytes(material)),
+                "sessions": plan_sessions}
+
     async def api_delivery_poll(self, request: web.Request) -> web.Response:
         """Poll entry point. Every barrier runs before anything is recorded.
 
@@ -1053,12 +1197,25 @@ class ConsoleServer:
                                           "heldBy": state.get("heldBy")}, status=409)
             self._clear_version_mismatch(browser_epoch, scope="LEGACY_AGENT")
             self._clear_version_mismatch(browser_epoch)
+            try:
+                reconcile_plan = self._build_reconcile_plan()
+            except (ProfileError, ChatBindingError) as exc:
+                return web.json_response({
+                    "ok": False, "code": "RECONCILE_PLAN_UNPROVABLE",
+                    "controlState": "OWNER", "browserEpoch": browser_epoch,
+                    "leaseUntil": state["leaseUntil"],
+                    "transferred": state["transferred"],
+                    "reacquired": state.get("reacquired", False),
+                    "expiredEndpoints": state["expiredEndpoints"],
+                    "error": str(exc),
+                }, status=409)
             return web.json_response({"ok": True, "controlState": "OWNER",
                                       "browserEpoch": browser_epoch,
                                       "leaseUntil": state["leaseUntil"],
                                       "transferred": state["transferred"],
                                       "reacquired": state.get("reacquired", False),
-                                      "expiredEndpoints": state["expiredEndpoints"]})
+                                      "expiredEndpoints": state["expiredEndpoints"],
+                                      "reconcilePlan": reconcile_plan})
 
         # The first ENDPOINT poll is what creates the endpoint, so this branch
         # checks ownership but cannot require the endpoint to exist yet.

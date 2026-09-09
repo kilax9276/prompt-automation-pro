@@ -12,7 +12,7 @@
 
     bash RUN_TESTS.sh
 
-Ожидается `283 passed, 64 subtests passed`.
+Ожидается `296 passed, 64 subtests passed`.
 
 Оба набора обязаны идти в одном процессе против одного релиза: каждый файл
 кладёт свой каталог релиза в `sys.path` и импортирует `profile_store`, а Python
@@ -29,7 +29,7 @@
     cd tools
     python3 verify_inventory.py     # 177 проверок
     python3 verify_overlaps.py      # 10 проверок
-    python3 verify_map.py           # 216 проверок
+    python3 verify_map.py           # 218 проверок
 
 Все три обязаны давать `failures=0`. `verify_map.py` в том числе запускает
 `extract_inventory.py` и требует, чтобы тот побайтно воспроизвёл приложенную
@@ -46,8 +46,7 @@
 подтверждают `working base subtrees match git` и `working base clean`. Дальше
 числа выросли от строк карты `MAP-083…089`, приёмок `ACC-S2-033…038`, `ACC-S5-026` и двух
 новых якорей (`attachment_chunk`, `_touch_lease`) в каталоге инвентаря.
-`MAP-089` добавляет server control-plane route для terminal endpoint close;
-поэтому verify_map вырос с 214 до 216 проверок.
+`MAP-089` добавил server control-plane route для terminal endpoint close; `MAP-090` добавляет authoritative CONTROL_AGENT reconciliation plan и `ACC-S2-039`; поэтому verify_map вырос до 218 проверок.
 
 Проверка whitespace выполняется по рабочему дереву без evidence-каталогов:
 

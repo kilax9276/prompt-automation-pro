@@ -1875,6 +1875,48 @@ pollKind = CONTROL_AGENT
   → владелец: controlState = OWNER, план примирения
   → другая живая эпоха: CONTROL_AGENT_CONFLICT, ни плана, ни доставки
 
+План примирения является авторитетным read-only снимком причин
+`profile-session:<sessionId>` и строится только из доказуемого сохранённого
+состояния консоли:
+
+```json
+{
+  "revision": "sha256:<canonical-plan>",
+  "sessions": [
+    {
+      "sessionId": "ps-...",
+      "profileId": "...",
+      "restartGeneration": 0,
+      "bindings": [
+        {
+          "bindingId": "...",
+          "chatType": "chatgpt",
+          "conversationId": "...",
+          "projectId": null,
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}
+```
+
+В план входят только `STARTING/RUNNING/DEGRADED` ProfileSession. Сессии
+сортируются по `sessionId`, bindings внутри — по `bindingId`; `revision`
+считается от канонического JSON `{sessions:[...]}` с сортировкой ключей и
+фиксированными separators, поле `revision` в собственный digest не входит.
+Deleted/missing или disabled binding не создаёт reason. Несовпадение
+`binding.profileId` с session, две live session одного profile, повреждённый
+`session.json`, повреждённый binding store или непригодная shape дают
+`RECONCILE_PLAN_UNPROVABLE` целиком: частичного плана нет. Presentation-loader,
+который пропускает нечитаемую строку, источником доказательства быть не может.
+
+Если новый plan недоказуем, browser сохраняет предыдущие cached
+`profile-session:*` reasons без изменений: не создаёт новых, не снимает старые
+и не трогает `manual`. Это означает «план неизвестен», а не «сессий нет». Старый
+cache при этом не становится свежим доказательством и не даёт права выполнять
+новые chat-actions. `CONTROL_AGENT_CONFLICT` plan не получает вообще.
+
 pollKind = ENDPOINT
   browserEpoch, endpointId, tabId, chatType,
   conversationId, projectId, url, title
@@ -2678,6 +2720,7 @@ Run без снимка и нет условий входа в срез 7 по �
 | 2026-09-08 | нулевой attachment size является каноническим значением и не подменяется `-1` truthiness-fallback | пустой файл — законный артефакт; `0` не означает отсутствие размера |
 | 2026-09-08 | S4 supersede сравнивает пару logicalDeliveryId/sideEffectKey и сохраняет S2 lease/single-flight interlock | две независимые доставки в один conversation должны пережить Prepare друг друга, но browser plane всё ещё не исполняет их одновременно |
 | 2026-09-09 | `tabs.onRemoved → CLOSED` имеет явную server control-plane операцию `/api/endpoints/close`; она требует browser auth, version 2.12.0, текущего CONTROL owner и endpoint той же epoch, остаётся доступной в delivery BARRIER и не меняет delivery jobs | внутреннего `EndpointRegistry.close()` недостаточно: без HTTP-маршрута расширение не могло выполнить MAP-053 вообще, а изображать CLOSED обычным ENDPOINT heartbeat означало бы записать ONLINE |
+| 2026-09-09 | `CONTROL_AGENT` owner получает канонический read-only `reconcilePlan` из строгого чтения live ProfileSession и ChatBinding; недоказуемая row валит весь plan, а missing/disabled binding просто не создаёт reason | browser session-reasons имеют источник истины в консоли; presentation `ProfileSessionStore.list()` пропускает нечитаемые rows и потому не может быть доказательством отсутствия |
 
 ### Инвариант фикстур
 

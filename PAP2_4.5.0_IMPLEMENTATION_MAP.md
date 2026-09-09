@@ -2,7 +2,7 @@
 
 Статус: **implementation map only**. Сервер/стенд не изменялись, сборка/активация не выполнялись. Основание: `Console 4.4.0 r7 + Extension 2.11.6 + receiver 2.10.0; git 830ab8c6453fa58ab1fd1339e210a41857e16df6`.
 
-- **Редакция дизайна:** `46ac8014f4c2c3dd3ab47d4134e432e389ea783ec3a6a960b1ab089eb011de4d` / 2699 строк
+- **Редакция дизайна:** `c7bcb8651a15419424603443239ff93b0347c4a849f814c63d79cf6dd0a690fa` / 2742 строк
 - **Историческая точка 4.4.0:** `830ab8c6453fa58ab1fd1339e210a41857e16df6` — не заменяется никогда. Каталоги `console_releases/4.3.5`, `console_releases/4.4.0` и корневой `server.py` заморожены: срез 1 не правил их на месте, а создал свои каталоги релизов. Поэтому строки закрытых срезов не устаревают — байты, которые они описывают, не изменятся.
 - **Статусы якорей:** строка закрытого среза помечена `HISTORICAL` и по байтам не сверяется; строка будущего среза помечена `ACTIVE` и её якоря выпущены на рабочем основании.
 - **Рабочее основание:** три поддерева git, перечисленные ниже. Коммит здесь не называется намеренно: поддерево живёт дольше любого коммита, а объявленный номер коммита устаревает при первой же несвязанной правке и начинает описывать не то дерево, которое проверяется. Идентичность даёт git, а не собственный дайджест: он уже строит Merkle-дерево по всем байтам. Именно поддеревья, а не `HEAD` и не корневое дерево — несвязанный коммит вроде правки README сдвигает корень, не сдвигая ни одного якоря, и значение, требующее ручной правки при каждом таком коммите, перестаёт описывать дерево.
@@ -1447,6 +1447,21 @@
 - **Acceptance:** `ACC-S2-038`
 - **Откат:** Rollback только вместе с парным server+extension boundary; route исчезает вместе с server slice 2, endpoint state отдельно не реконструируется.
 
+### MAP-090 — срез 2 — `console_releases/4.5.0-s1/console_server.py` / `api_delivery_poll`
+
+- **Статус якорей:** ACTIVE на рабочем основании closed-S1; путь основания `830ab8c6` был `console_releases/4.4.0/console_server.py`.
+- **Релиз-основание:** Console 4.4.0 r7 + Extension 2.11.6 + receiver 2.10.0; git 830ab8c6453fa58ab1fd1339e210a41857e16df6
+- **Полный SHA-256:** `565e8558d0a3607f9351c7246f44e7b38713d21ede23e4fdcb46bccbdcc3716a`
+- **Точный диапазон:** `768–788`
+- **Текущая обязанность:** `CONTROL_AGENT` арбитрирует ownership, но успешный owner получает только lease metadata; авторитетного плана `ProfileSession → ChatBinding` для восстановления `profile-session:<sessionId>` причин нет. Presentation `ProfileSessionStore.list()` при этом пропускает нечитаемые rows и непригоден как fail-closed источник.
+- **Обязанность 4.5:** Успешный CONTROL owner получает read-only `reconcilePlan` из доказуемых live `ProfileSession` (`STARTING/RUNNING/DEGRADED`) и принадлежащих им enabled `ChatBinding`. Сессии канонически сортируются по `sessionId`, bindings по `bindingId`; `revision` — `sha256:` канонического JSON без самого revision. Missing/deleted или disabled binding не создаёт reason. Malformed/ambiguous session/binding, profileId drift или повреждённый binding store делают весь plan `RECONCILE_PLAN_UNPROVABLE`, без частичного ответа. Конфликтующая epoch plan не получает.
+- **Изменение:** добавление
+- **Контракты:** §9c; §10e–10f; §10g; §10i; `MAP-052`; `MAP-055`
+- **Что менять нельзя:** Не выводить session reasons из `/api/endpoints`, legacy `enabledTabs`, storage cache или открытых tabs. Plan не выбирает endpoint, не исполняет chat actions и не пишет ProfileSession/ChatBinding. Не использовать `ProfileSessionStore.list()` как доказательство: нечитаемая row — UNKNOWN, не отсутствие. `CONTROL_AGENT_CONFLICT` не получает plan. Отсутствующий plan не означает пустой plan.
+- **Миграция:** Нет. Browser cache строится extension 2.12.0 заново из успешного server plan; старые cache values авторитетными не становятся.
+- **Acceptance:** `ACC-S2-002`, `ACC-S2-003`, `ACC-S2-039`
+- **Откат:** Rollback только вместе с атомарной server+extension границей среза 2; plan исчезает вместе с новым CONTROL protocol, локальный session cache отбрасывается.
+
 ## 4. Миграция ломающих границ
 
 ### 4.1. Граница среза 2
@@ -1504,8 +1519,8 @@ Server endpoint ownership/registry, Extension endpointId/epoch/alarms и canonic
 | `ACC-S1-017` | Пятая Files navigation/view существует в slice1 как явный not-ready scaffold и не выполняет client-only file operations до 3a API. | PASS |
 | `ACC-S1-018` | Явное «Повторить как новый Run» создаёт новый Run через repeatAsNew с repeatOf/dedupeBypass audit и новым snapshot provenance; обычный duplicate path его не вызывает. | PASS |
 | `ACC-S2-001` | Несовместимая extensionVersion отвергается до ownership arbitration и endpoint observe. | PLANNED |
-| `ACC-S2-002` | CONTROL_AGENT без owner получает lease и reconciliation plan; delivery отсутствует. | PLANNED |
-| `ACC-S2-003` | Вторая живая epoch получает CONTROL_AGENT_CONFLICT без plan/delivery/state mutation. | PLANNED |
+| `ACC-S2-002` | CONTROL_AGENT без owner получает lease и reconciliation plan; delivery отсутствует. | PASS |
+| `ACC-S2-003` | Вторая живая epoch получает CONTROL_AGENT_CONFLICT без plan/delivery/state mutation. | PASS |
 | `ACC-S2-004` | ENDPOINT при отсутствии/истёкшем ownership получает NOT_CONTROL_OWNER до observe. | PLANNED |
 | `ACC-S2-005` | ENDPOINT чужой живой epoch получает CONTROL_AGENT_CONFLICT до observe. | PLANNED |
 | `ACC-S2-006` | Browser barrier отвергает old/fenced protocol до browser state mutation. | PLANNED |
@@ -1592,6 +1607,7 @@ Server endpoint ownership/registry, Extension endpointId/epoch/alarms и canonic
 | `ACC-S2-036` | Во время передачи вложения браузер шлёт `HEARTBEAT` независимо от ожидания chunk с каденцией отправки не более 5 секунд; неуспешный `HEARTBEAT` продлением не считается; при утрате доказательства живой аренды цикл не продолжает работу так, будто аренда продлена; chunk продлением не считается. Величина разрыва между сохранёнными на сервере продлениями предметом этой приёмки не является: задержанный или потерянный ответ не делает исправное расширение нарушителем. | PLANNED |
 | `ACC-S2-037` | Источник восстановления называется только когда он доказан: непригодное сохранённое время отправки, две одинаковые максимальные метки, нечитаемое сохранённое задание, отправленное задание без единой метки времени, время отправки в будущем и непригодная к прочтению цель задания, включая отсутствующий `url`, дают недоказуемость с причиной, а не отсутствие; законные пропуски — только доказанно другая вкладка или страница и доказанно старше окна восстановления; обход и явно названный источник принимают решение о цели одним общим помощником; при недоказуемости названный браузером источник не используется и автоматический источник не выбирается; после исправления сохранённого значения поиск снова работает. | PLANNED |
 | `ACC-S2-038` | Browser endpoint close route требует auth + extensionVersion 2.12.0 + текущее CONTROL ownership + endpoint той же browserEpoch до terminal write; owner получает CLOSED, foreign/expired owner не меняет endpoint, CLOSED/EXPIRED идемпотентны, delivery BARRIER не отключает cleanup и route не меняет delivery jobs. | PASS |
+| `ACC-S2-039` | Reconciliation plan каноничен и read-only; unreadable/malformed/ambiguous ProfileSession/ChatBinding или profileId drift дают whole-plan `RECONCILE_PLAN_UNPROVABLE` без частичного plan; missing/disabled binding не создаёт reason. | PASS |
 | `ACC-UI-001` | New UI states remain visible/actionable at normal and narrow layouts; CSS does not hide failures. | PLANNED |
 
 ## 6. Матрица отката по acceptance ID
@@ -1725,6 +1741,7 @@ Server endpoint ownership/registry, Extension endpointId/epoch/alarms и canonic
 | `ACC-S2-036` | Rollback вместе с атомарной границей среза 2; требование heartbeat исчезает вместе с расширением среза 2. |
 | `ACC-S2-037` | Rollback вместе с атомарной границей среза 2: трёхзначный ответ исчезает вместе с сервером среза 2; повреждённое сохранённое время откатом не чинится. |
 | `ACC-S2-038` | Rollback вместе с атомарной границей среза 2: browser close route исчезает вместе с сервером; terminal endpoint rows отдельно не реконструируются и old extension не должен вызывать новый route. |
+| `ACC-S2-039` | Rollback вместе с атомарной границей среза 2: reconciliation plan исчезает вместе с новым CONTROL protocol; browser session-reason cache отбрасывается и не становится источником истины. |
 | `ACC-UI-001` | Code-only rollback if backing API/schema unchanged; otherwise follow owning slice rollback. |
 
 ## 7. Порядок реализации после карты
@@ -1740,8 +1757,8 @@ Server endpoint ownership/registry, Extension endpointId/epoch/alarms и canonic
 - historical git HEAD: `830ab8c6453fa58ab1fd1339e210a41857e16df6` — историческая точка 4.4.0, не рабочее основание
 - рабочее основание: три поддерева git, объявлены в §1 и сверяются с репозиторием
 - файлов основания: **18**
-- точек врезки/guard rows: **89**
-- acceptance definitions: **128**
+- точек врезки/guard rows: **90**
+- acceptance definitions: **129**
 - `verify_map.py` сверяет эти числа с фактическим содержимым карты: расхождение означает, что самосводку не обновили после правки.
 - Рабочее основание пересчитывается после каждого формально закрытого среза. `830ab8c6…` остаётся исторической точкой 4.4.0 и не является рабочим основанием следующего среза после закрытия предыдущего.
 
